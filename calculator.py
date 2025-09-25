@@ -2,7 +2,10 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import math
+import matplotlib
+matplotlib.use("Agg")  # headless backend for Streamlit/servers
 import matplotlib.pyplot as plt
+
 
 # -----------------------------
 # Constants & helpers
