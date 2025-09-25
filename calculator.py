@@ -1,28 +1,30 @@
-import streamlit as st
-import numpy as np
-import pandas as pd
-import math
 import matplotlib
 matplotlib.use("Agg")  # headless backend for Streamlit/servers
 import matplotlib.pyplot as plt
-
+import numpy as np
+import pandas as pd
+import io
+import streamlit as st
 
 # -----------------------------
 # Constants & helpers
 # -----------------------------
 G = 9.80665             # m/s^2 per g
 FT_PER_M = 3.28084
-M_PER_FT = 1.0 / FT_PER_M
 MS_PER_FPM = 0.00508    # 1 fpm = 0.00508 m/s
 
 DEFAULT_ALIM_FT = 600.0
 DEFAULT_RESP_THRESH_FPM = 300.0   # Eurocontrol/IATA FDM meaningful response threshold
-REVERSAL_DWELL_S = 1.5
 ALIM_MARGIN_FT = 100.0
+
+# dwell scales a touch with how late the encounter is
+def dwell_fn(tgo_s: float) -> float:
+    # 0.8s at tgo<=12s, rising to 1.8s by tgo>=32s (clamped)
+    return float(np.clip(0.8 + 0.05*(tgo_s - 12.0), 0.8, 1.8))
 
 # --- piecewise vertical kinematics (paper's model) ---
 def delta_h_piecewise(t_cpas_s: float, t_delay_s: float, a_g: float, v_f_fpm: float) -> float:
-    """Return displacement in FEET from RA to CPA for one aircraft."""
+    """Return displacement in FEET from RA to CPA for one aircraft (accelerate to v_f then hold)."""
     a = a_g * G                             # m/s^2
     v_f_mps = v_f_fpm * MS_PER_FPM         # m/s
     if t_cpas_s <= t_delay_s:
@@ -51,8 +53,16 @@ def vs_time_series(t_end_s, dt_s, t_delay_s, a_g, v_f_fpm, sense, cap_fpm=None):
             vs[i] = sense * (v_mps / MS_PER_FPM)              # fpm (signed)
     return times, vs
 
+def integrate_altitude_from_vs(times_s: np.ndarray, vs_fpm: np.ndarray) -> np.ndarray:
+    """Integrate VS (fpm) to altitude (ft), z(0)=0."""
+    dt = np.diff(times_s, prepend=times_s[0])
+    fps = vs_fpm / 60.0
+    z = np.cumsum(fps * dt)
+    z[0] = 0.0
+    return z
+
 def predicted_dh_linear(vs_own_fpm, vs_int_fpm, t_go_s):
-    """Linear projection of vertical miss distance over time-to-go (approx)."""
+    """Linear projection of vertical miss distance over t_go (approx)."""
     return abs((vs_own_fpm - vs_int_fpm) * (t_go_s / 60.0))
 
 def compliant_in_sense(vs_fpm, sense, thr=DEFAULT_RESP_THRESH_FPM):
@@ -71,14 +81,14 @@ def time_to_go_from_geometry(r0_nm, v_closure_kt):
         return None
     return 3600.0 * (r0_nm / v_closure_kt)
 
-# --- v7.1 surrogate: prefer strengthening; reverse for wrong-direction or late-chase ---
-def surrogate_decision(times, vs_own, vs_int, t_cpas_s, resp_thr=DEFAULT_RESP_THRESH_FPM):
+# --- v7.1 surrogate (with cause tagging) ---
+def surrogate_decision_with_cause(times, vs_own, vs_int, t_cpas_s, resp_thr=DEFAULT_RESP_THRESH_FPM):
     """
-    Decide first event: 'STRENGTHEN', 'REVERSE', or none, based on:
-      1) compliance check,
-      2) predicted ALIM shortfall,
-      3) vertical-chase late geometry.
-    We assume initial coordinated opposite senses: ownship = climb (+), intruder = descend (-).
+    First event: 'STRENGTHEN' or 'REVERSE' or none.
+    Causes:
+      - INTRUDER_NONCOMPL_AFTER_DWELL
+      - ALIM_SHORTFALL_LATE  (tgo<6 → REVERSE)
+      - ALIM_SHORTFALL_EARLY (tgo>=6 → STRENGTHEN)
     """
     for i, t in enumerate(times):
         t_go = max(0.0, t_cpas_s - t)
@@ -89,19 +99,19 @@ def surrogate_decision(times, vs_own, vs_int, t_cpas_s, resp_thr=DEFAULT_RESP_TH
         dh_pred = predicted_dh_linear(vs_own[i], vs_int[i], t_go)
 
         # Wrong-direction intruder while own is compliant → REVERSE (after dwell)
-        if (not int_ok) and own_ok and (t >= REVERSAL_DWELL_S):
-            return [("REVERSE", float(t))]
+        if (not int_ok) and own_ok and (t >= dwell_fn(t_go)):
+            return [("REVERSE", float(t), "INTRUDER_NONCOMPL_AFTER_DWELL")]
 
         # ALIM shortfall prediction
         if dh_pred < (DEFAULT_ALIM_FT - ALIM_MARGIN_FT):
             if t_go < 6.0:
-                return [("REVERSE", float(t))]
+                return [("REVERSE", float(t), "ALIM_SHORTFALL_LATE")]
             else:
-                return [("STRENGTHEN", float(t))]
+                return [("STRENGTHEN", float(t), "ALIM_SHORTFALL_EARLY")]
     return []
 
 def baseline_dh_ft(t_cpas_s, mode="IDEAL"):
-    """Δh for the baseline 1500 fpm aircraft at same tcpas (for risk scaling)."""
+    """Δh for the baseline 1500 fpm aircraft at same t_cpas (for risk scaling)."""
     if mode == "IDEAL":
         return delta_h_piecewise(t_cpas_s, t_delay_s=1.0, a_g=0.25, v_f_fpm=1500)
     else:
@@ -113,11 +123,11 @@ def baseline_dh_ft(t_cpas_s, mode="IDEAL"):
 st.title("ACAS/TCAS v7.1 — Residual Risk & RA Taxonomy (Batch Monte Carlo)")
 
 st.markdown("""
-This tool implements your paper’s piecewise vertical-response model to compute Δh at CPA and scale
-unresolved residual risk using the ACASA 1.1% benchmark, then applies a light v7.1 surrogate
-to tag strengthening vs reversal events.
+Implements a piecewise vertical-response model (accelerate to VS target, then hold) to compute Δh at CPA,
+scales unresolved residual risk using an ACASA 1.1% benchmark vs a 1500 fpm baseline, and applies a light v7.1 surrogate
+(“strengthen” vs “reverse”).
 
-**Note:** This flags ALIM breaches only at CPA. True “unresolved” in ACASA considers minima anywhere along the trajectory.
+**Note:** ALIM breaches are checked at CPA only (proxy for unresolved min).
 """)
 
 with st.sidebar:
@@ -165,10 +175,11 @@ with h2:
     t_cpa = st.number_input("RA→CPA time (s) (override)", value=float(round(tgo_default, 1)), step=1.0)
 
 # Single-run Δh & risk
+baseline_mode = "IDEAL" if baseline.startswith("IDEAL") else "STANDARD"
 dh_pl_ft = delta_h_piecewise(t_cpa, pl_td, pl_ag, min(pl_vs, pl_cap))
 dh_cat_ft = delta_h_piecewise(t_cpa, cat_td, cat_ag, min(cat_vs, cat_cap))
-baseline_mode = "IDEAL" if baseline.startswith("IDEAL") else "STANDARD"
 dh_base_ft = baseline_dh_ft(t_cpa, mode=baseline_mode)
+dh_total_ft = dh_pl_ft + dh_cat_ft
 
 st.markdown("### Single-run Δh & unresolved residual risk")
 spot = pd.DataFrame({
@@ -184,22 +195,44 @@ st.write(f"Scaled unresolved residual risk ≈ {unres_rr:,.3f}% (ratio {ratio:,.
 # Surrogate event for single-run
 times, vs_pl = vs_time_series(t_cpa, dt, pl_td, pl_ag, pl_vs, sense=+1, cap_fpm=pl_cap)
 _,     vs_cat = vs_time_series(t_cpa, dt, cat_td, cat_ag, cat_vs, sense=-1, cap_fpm=cat_cap)
-events = surrogate_decision(times, vs_pl, vs_cat, t_cpas_s=t_cpa, resp_thr=resp_thr)
+ev = surrogate_decision_with_cause(times, vs_pl, vs_cat, t_cpas_s=t_cpa, resp_thr=resp_thr)
 
 st.markdown("### Single-run RA taxonomy (surrogate)")
-if events:
-    st.write(f"First event: {events[0][0]} at t={events[0][1]:.1f}s.")
+if ev:
+    st.write(f"First event: **{ev[0][0]}** at t={ev[0][1]:.1f}s — cause: `{ev[0][2]}`.")
 else:
     st.write("No strengthen/reverse flagged (coordinated & compliant case).")
 
-fig, ax = plt.subplots(figsize=(7, 3))
-ax.plot(times, vs_pl, label="PL VS (fpm)")
-ax.plot(times, vs_cat, label="CAT VS (fpm)")
-ax.set_xlabel("Time since RA (s)")
-ax.set_ylabel("Vertical speed (fpm)")
-ax.grid(True, alpha=0.3)
-ax.legend()
-st.pyplot(fig)
+# VS plot
+fig_vs, ax_vs = plt.subplots(figsize=(7, 3))
+ax_vs.plot(times, vs_pl, label="PL VS (fpm)")
+ax_vs.plot(times, vs_cat, label="CAT VS (fpm)")
+ax_vs.set_xlabel("Time since RA (s)")
+ax_vs.set_ylabel("Vertical speed (fpm)")
+ax_vs.grid(True, alpha=0.3)
+ax_vs.legend()
+st.pyplot(fig_vs)
+
+# Geometry plot (Z vs time) with Δh_total annotation at CPA
+z_pl = integrate_altitude_from_vs(times, vs_pl)         # ft
+z_cat = -integrate_altitude_from_vs(times, -vs_cat)     # keep sign (CAT descending negative)
+fig_z, ax_z = plt.subplots(figsize=(7, 3.4))
+ax_z.plot(times, z_pl, label="PL Z (ft)")
+ax_z.plot(times, z_cat, label="CAT Z (ft)")
+ax_z.axvline(t_cpa, ls="--", alpha=0.7)
+ax_z.grid(True, alpha=0.3)
+ax_z.set_xlabel("Time since RA (s)")
+ax_z.set_ylabel("Altitude change from RA (ft)")
+
+# annotate Δh at CPA
+ax_z.annotate(
+    f"Δh_total @ CPA ≈ {dh_total_ft:,.0f} ft",
+    xy=(t_cpa, z_pl[-1]),
+    xytext=(t_cpa*0.6, max(z_pl.max(), z_cat.max())*0.7 if max(z_pl.max(), z_cat.max())>0 else 200),
+    arrowprops=dict(arrowstyle="->", lw=1),
+)
+ax_z.legend()
+st.pyplot(fig_z)
 
 # -----------------------------
 # Batch Monte Carlo
@@ -262,7 +295,7 @@ if runbtn:
         tgo = time_to_go_from_geometry(r0, vcl)
         if tgo is None:
             continue
-        tgo = min(max(tgo, 12.0), 60.0)  # practical window
+        tgo = float(np.clip(tgo, 12.0, 60.0))  # practical window
 
         # Δh (ft)
         dhpl = delta_h_piecewise(tgo, pl_td, pl_ag, min(pl_vs, pl_cap))
@@ -274,12 +307,13 @@ if runbtn:
         ratio = (dhbase / dhpl) if dhpl > 1e-6 else np.nan
         unresrr = 1.1 * ratio
 
-        # surrogate events
+        # surrogate events (with cause)
         times_r, vs_pl_r = vs_time_series(tgo, dt, pl_td, pl_ag, pl_vs, sense=+1, cap_fpm=pl_cap)
         _,       vs_cat_r = vs_time_series(tgo, dt, cat_td, cat_ag, cat_vs, sense=-1, cap_fpm=cat_cap)
-        ev = surrogate_decision(times_r, vs_pl_r, vs_cat_r, t_cpas_s=tgo, resp_thr=resp_thr)
+        ev = surrogate_decision_with_cause(times_r, vs_pl_r, vs_cat_r, t_cpas_s=tgo, resp_thr=resp_thr)
         evtype = ev[0][0] if ev else "NONE"
         evtime = ev[0][1] if ev else np.nan
+        evcause = ev[0][2] if ev else "N/A"
 
         # ALIM@CPA breach
         breach = dhtotal < alim_ft
@@ -300,6 +334,7 @@ if runbtn:
             "unresolvedRRpct": unresrr,
             "eventtype": evtype,
             "eventtimes": evtime,
+            "eventcause": evcause,
             "ALIMbreachatCPA": breach,
             "FLband": f"FL{int(fllow)}–FL{int(flhigh)}"
         })
@@ -307,48 +342,89 @@ if runbtn:
     df = pd.DataFrame(data)
     st.success(f"Completed {len(df)} runs.")
 
-    # Aggregates
-    prev = (df["eventtype"] == "REVERSE").mean()
-    pstr = (df["eventtype"] == "STRENGTHEN").mean()
-    pbreach = df["ALIMbreachatCPA"].mean()
+    # --- KPIs
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("P(reversal)", f"{(df['eventtype']=='REVERSE').mean():.2%}")
+    k2.metric("P(strengthen)", f"{(df['eventtype']=='STRENGTHEN').mean():.2%}")
+    k3.metric("Mean RR", f"{df['unresolvedRRpct'].mean():.3f}%")
+    k4.metric("P(ALIM breach@CPA)", f"{df['ALIMbreachatCPA'].mean():.2%}")
 
-    st.subheader("Batch summary")
-    st.write(f"Mean unresolved RR: {df['unresolvedRRpct'].mean():.3f}% "
-             f"(p10={df['unresolvedRRpct'].quantile(0.10):.3f}%, "
-             f"median={df['unresolvedRRpct'].median():.3f}%, "
-             f"p90={df['unresolvedRRpct'].quantile(0.90):.3f}%)")
-    st.write(f"P(reversal): {prev:.4f}  |  P(strengthen): {pstr:.4f}  |  P(ALIM breach @ CPA): {pbreach:.4f}")
-
-    # Plots
-    c1, c2 = st.columns(2)
-    with c1:
-        fig1, ax1 = plt.subplots(figsize=(6, 3))
-        ax1.hist(df["unresolvedRRpct"].dropna(), bins=30)
-        ax1.set_title("Unresolved residual risk (%)")
-        ax1.set_xlabel("%")
-        ax1.set_ylabel("Count")
-        ax1.grid(alpha=0.3)
-        st.pyplot(fig1)
-    with c2:
-        counts = df["eventtype"].value_counts().reindex(["STRENGTHEN", "REVERSE", "NONE"]).fillna(0)
-        fig2, ax2 = plt.subplots(figsize=(5, 3))
-        ax2.pie(counts.values, labels=counts.index, autopct="%1.1f%%")
-        ax2.set_title("Event taxonomy")
-        st.pyplot(fig2)
-
-    st.subheader("Download per-run CSV")
-    st.download_button(
-        label="Download CSV",
-        data=df.to_csv(index=False).encode("utf-8"),
-        filename="tcas_batch_results.csv",
-        mime="text/csv"
-    )
+    # --- Filters
+    st.sidebar.subheader("Explore batch")
+    tgo_lo, tgo_hi = st.sidebar.slider("tgo window (s)", 12.0, 60.0, (12.0, 60.0))
+    only_rev = st.sidebar.checkbox("Only reversals", value=False)
+    view = df[df["tgos"].between(tgo_lo, tgo_hi)]
+    if only_rev:
+        view = view[view["eventtype"] == "REVERSE"]
 
     st.subheader("Preview of results")
-    st.dataframe(df.head(20), use_container_width=True)
+    st.dataframe(view.head(200), use_container_width=True)
+
+    # --- ECDF of unresolved RR
+    vals = view["unresolvedRRpct"].dropna().values
+    if len(vals):
+        x = np.sort(vals); y = np.arange(1, len(x)+1)/len(x)
+        fig_ecdf, ax_ecdf = plt.subplots(figsize=(6, 3))
+        ax_ecdf.plot(x, y)
+        ax_ecdf.set_xlabel("Unresolved RR (%)")
+        ax_ecdf.set_ylabel("ECDF")
+        ax_ecdf.grid(True, alpha=0.3)
+        st.pyplot(fig_ecdf)
+
+    # --- tgo hist by event type
+    fig_hist, ax_hist = plt.subplots(figsize=(6, 3))
+    for lab in ["STRENGTHEN", "REVERSE", "NONE"]:
+        sub = view[view["eventtype"] == lab]["tgos"]
+        if len(sub):
+            ax_hist.hist(sub, bins=24, histtype="step", label=lab)
+    ax_hist.set_xlabel("tgo (s)")
+    ax_hist.set_ylabel("Count")
+    ax_hist.grid(True, alpha=0.3)
+    ax_hist.legend()
+    st.pyplot(fig_hist)
+
+    # --- event cause bar
+    cause_counts = view["eventcause"].value_counts()
+    if len(cause_counts):
+        fig_bar, ax_bar = plt.subplots(figsize=(6, 3))
+        ax_bar.bar(cause_counts.index, cause_counts.values)
+        ax_bar.set_ylabel("Count"); ax_bar.set_title("Event causes")
+        for tick in ax_bar.get_xticklabels():
+            tick.set_rotation(20)
+        st.pyplot(fig_bar)
+
+    # --- Downloads (robust)
+    st.subheader("Download batch data")
+    # CSV
+    csv_buf = io.BytesIO()
+    csv_buf.write(df.to_csv(index=False).encode("utf-8"))
+    csv_buf.seek(0)
+    st.download_button(
+        label="Download CSV",
+        data=csv_buf,
+        file_name="tcas_batch_results.csv",
+        mime="text/csv",
+        key="dl_csv"
+    )
+    # Parquet (smaller)
+    try:
+        import pyarrow  # noqa: F401
+        pq_buf = io.BytesIO()
+        df.to_parquet(pq_buf, index=False)
+        pq_buf.seek(0)
+        st.download_button(
+            label="Download Parquet",
+            data=pq_buf,
+            file_name="tcas_batch_results.parquet",
+            mime="application/octet-stream",
+            key="dl_parquet"
+        )
+    except Exception:
+        st.caption("Install `pyarrow` to enable Parquet download (smaller & preserves dtypes).")
 
 st.caption("""
-References: EUROCONTROL ACAS II Guide (system behaviour, ALIM) · FAA TCAS II v7.1 Intro (reversal improvements) ·
-EUROCONTROL ACAS II Bulletin 13 (reversal rarity and causes) · Skybrary (TCAS RA reversal operational notes) ·
+Refs: EUROCONTROL ACAS II Guide (system behaviour, ALIM) · FAA TCAS II v7.1 Intro (reversal improvements) ·
+EUROCONTROL ACAS II Bulletin 13 (reversal rarity and causes) · Skybrary (operational notes) ·
 EUROCONTROL/IATA FDM guidance (≥300 fpm 'meaningful' response).
 """)
+
