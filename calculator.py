@@ -1,10 +1,10 @@
-# app_v3.2.1.py
+# app_v3.2.2.py
 # ACAS/TCAS v7.1 — Residual Risk & RA Taxonomy (Batch Monte Carlo, regulator-ready)
-# Fixes:
-#  - Two-stage RA logic: Strengthen may be overridden by a later Reversal (non-compliance or very-late shortfall)
-#  - "ANY" metric: min predicted CPA miss starts only after BOTH aircraft are meaningfully responding (>=300 fpm) + 0.5 s
-#  - Strengthen escalates CAT target VS (+500 fpm, capped) post-event, with ramp at cat_accel_g
-#  - No trailing else:, robust % formatting
+# Fixes vs v3.2.1:
+#  - Late reversal uses proper predicted CPA miss (includes current separation) — no more "reverse all"
+#  - Late monitoring sees the post-Strengthen intruder profile (CAT rate step-up applied before monitor)
+#  - Dwell for non-compliance override is measured since Strengthen, not from t=0
+#  - Surrogate monitor uses UI ALIM (passed in), not a fixed constant
 import io
 import numpy as np
 import pandas as pd
@@ -145,64 +145,84 @@ def apply_surveillance_noise(rng, times, vs_own, vs_int, p_miss=0.0):
 # -----------------------------
 def dwell_fn(tgo_s: float) -> float:
     return float(np.clip(0.8 + 0.05 * (tgo_s - 12.0), 0.8, 1.8))
-def predicted_dh_linear(vs_own_fpm, vs_int_fpm, t_go_s):
-    return abs((vs_own_fpm - vs_int_fpm) * (t_go_s / 60.0))
-def compliant_in_sense(vs_fpm, sense, thr=DEFAULT_RESP_THRESH_FPM):
-    return (vs_fpm * sense) >= thr
-def first_compliance_time(times, vs_fpm, sense, thr=DEFAULT_RESP_THRESH_FPM):
-    ok = (vs_fpm * sense) >= thr
-    if ok.any():
-        idx = np.argmax(ok)
-        return times[idx]
-    return np.inf
+def predicted_miss_at_cpa(sep_now_ft: float, vs_own_fpm: float, vs_int_fpm: float, t_go_s: float) -> float:
+    """Predicted |vertical miss at CPA| given current separation and current vertical rates."""
+    return abs(sep_now_ft + (vs_own_fpm - vs_int_fpm) * (t_go_s / 60.0))
 def surrogate_decision_stream(
-    times, vs_own, vs_int, t_cpa_s,
-    resp_thr=DEFAULT_RESP_THRESH_FPM,
-    intruder_delay_s=5.0,
-    noncomp_grace_s=2.0,
-    ta_only=False
+    times: np.ndarray,
+    vs_own: np.ndarray,
+    vs_int: np.ndarray,
+    sep_now: np.ndarray,
+    t_cpa_s: float,
+    alim_ft: float,
+    resp_thr: float = DEFAULT_RESP_THRESH_FPM,
 ):
     """
-    Return a list of events [(type, t, cause)], allowing Strengthen to be overridden by a later Reversal.
-      - Early: if predicted ALIM shortfall and not late -> STRENGTHEN
-      - Override: if (not TA-only) intruder non-compliant after (delay+grace) & dwell -> REVERSE
-      - Late: if predicted shortfall with t_go<6s -> REVERSE
+    Phase 1: Detect an EARLY Strengthen (preferred) or an immediate LATE Reversal if already very-late.
+    Uses PROPER predicted CPA miss (includes current separation).
+    Returns (events, t_strengthen) where t_strengthen is np.nan if none.
     """
     events = []
+    t_strengthen = np.nan
     min_eval_time = 0.2
-    have_strengthen = False
     for i, t in enumerate(times):
         t_go = max(0.0, t_cpa_s - t)
         if t_go <= 0.0:
             break
-        own_ok = compliant_in_sense(vs_own[i], +1, thr=resp_thr)
-        int_ok = compliant_in_sense(vs_int[i], -1, thr=resp_thr)
-        # 1) If no event yet, we may issue an early Strengthen (preferred) or a late Reversal
-        if not events:
-            if t >= min_eval_time and own_ok:
-                dh_pred = predicted_dh_linear(vs_own[i], vs_int[i], t_go)
-                if dh_pred < (DEFAULT_ALIM_FT - ALIM_MARGIN_FT):
-                    if t_go < 6.0:
-                        events.append(("REVERSE", float(t), "ALIM_SHORTFALL_LATE"))
-                        break
-                    else:
-                        events.append(("STRENGTHEN", float(t), "ALIM_SHORTFALL_EARLY"))
-                        have_strengthen = True
-                        # keep monitoring for possible override
-                        continue
-        # 2) After Strengthen, allow override Reversal if intruder proves non-compliant (v7.1 intent)
-        if have_strengthen:
-            # Non-compliance override (disabled for TA-only)
-            if (not ta_only) and t >= (intruder_delay_s + noncomp_grace_s) and own_ok and (t >= dwell_fn(t_go)):
+        # "Meaningful response" in commanded sense: ownship should be climbing, intruder descending
+        own_ok = (vs_own[i] >= resp_thr)
+        if not events and t >= min_eval_time and own_ok:
+            miss_pred = predicted_miss_at_cpa(sep_now[i], vs_own[i], vs_int[i], t_go)
+            if miss_pred < (alim_ft - ALIM_MARGIN_FT):
+                if t_go < 6.0:
+                    events.append(("REVERSE", float(t), "ALIM_SHORTFALL_LATE"))
+                    return events, t_strengthen
+                else:
+                    events.append(("STRENGTHEN", float(t), "ALIM_SHORTFALL_EARLY"))
+                    t_strengthen = float(t)
+                    break  # Strengthen fired; go to Phase 2
+    return events, t_strengthen
+def late_override_monitor(
+    events: list,
+    t_strengthen: float,
+    times: np.ndarray,
+    vs_own: np.ndarray,
+    vs_int: np.ndarray,
+    sep_now: np.ndarray,
+    t_cpa_s: float,
+    alim_ft: float,
+    resp_thr: float,
+    intruder_delay_s: float,
+    noncomp_grace_s: float,
+    ta_only: bool
+):
+    """
+    Phase 2: After Strengthen, allow override by REVERSE if:
+      a) intruder non-compliant after its own delay + grace + dwell_since_strengthen, or
+      b) t_go < 6 s AND predicted miss at CPA still < (ALIM - margin).
+    """
+    have_strengthen = any(e[0] == "STRENGTHEN" for e in events)
+    if not have_strengthen:
+        return events
+    t_str = next(e[1] for e in events if e[0] == "STRENGTHEN")
+    for i, t in enumerate(times):
+        t_go = max(0.0, t_cpa_s - t)
+        if t_go <= 0.0:
+            break
+        own_ok = (vs_own[i] >= resp_thr)
+        int_ok = ((-vs_int[i]) >= resp_thr)  # intruder descending as commanded
+        # (a) Non-compliance override, with dwell SINCE STRENGTHEN
+        if (not ta_only) and own_ok:
+            if (t >= (intruder_delay_s + noncomp_grace_s)) and ((t - t_str) >= dwell_fn(t_go)):
                 if not int_ok:
                     events.append(("REVERSE", float(t), "INTRUDER_NONCOMPL_AFTER_DWELL"))
-                    break
-            # Very-late shortfall override
-            if own_ok:
-                dh_pred = predicted_dh_linear(vs_own[i], vs_int[i], t_go)
-                if (t_go < 6.0) and (dh_pred < (DEFAULT_ALIM_FT - ALIM_MARGIN_FT)):
-                    events.append(("REVERSE", float(t), "ALIM_SHORTFALL_LATE"))
-                    break
+                    return events
+        # (b) Very-late predicted shortfall (proper CPA miss)
+        if own_ok and (t_go < 6.0):
+            miss_pred = predicted_miss_at_cpa(sep_now[i], vs_own[i], vs_int[i], t_go)
+            if miss_pred < (alim_ft - ALIM_MARGIN_FT):
+                events.append(("REVERSE", float(t), "ALIM_SHORTFALL_LATE"))
+                return events
     return events
 # -----------------------------
 # Wilson 95% CI for probabilities
@@ -344,17 +364,20 @@ if submitted:
             tgo = sample_tgo_with_trigger(rng, scenario, tgo_geom, FL_pl, FL_cat, cap_s=tgo_cap)
         else:
             tgo = float(np.clip(tgo_geom if tgo_geom is not None else 30.0, 6.0, tgo_cap))
+        # PL and CAT nominal responses
         pl_td_k = PL_DELAY_S
         pl_ag_k = PL_ACCEL_G
         if use_distrib:
             cat_td_k, cat_ag_k = sample_pilot_response_cat(rng)
         else:
             cat_td_k, cat_ag_k = cat_td_nom, cat_ag_nom
+        # Baseline deltas for RR scaling
         dh_pl = delta_h_piecewise(tgo, pl_td_k, pl_ag_k, PL_VS_FPM)
         dh_cat= delta_h_piecewise(tgo, cat_td_k, cat_ag_k, cat_vs)
         dh_base = baseline_dh_ft(tgo, mode=baseline)
         ratio = (dh_base / dh_pl) if dh_pl > 1e-6 else np.nan
         unres_rr = 1.1 * ratio
+        # VS time series (nominal commanded)
         times, vs_pl = vs_time_series(tgo, dt, pl_td_k, pl_ag_k, PL_VS_FPM, sense=+1, cap_fpm=PL_VS_CAP)
         _,     vs_ca = vs_time_series(tgo, dt, cat_td_k, cat_ag_k, cat_vs, sense=-1, cap_fpm=cat_cap)
         # Intruder non-compliance: mutually exclusive, TA_ONLY precedence
@@ -364,9 +387,12 @@ if submitted:
         else:
             p1, p2, p3 = p_opposite, p_opposite + p_leveloff, p_opposite + p_leveloff + p_persist
             if jitter:
-                p1 *= float(np.clip(rng.uniform(0.5, 1.5), 0.0, 2.0))
-                p2 = p1 + p_leveloff * float(np.clip(rng.uniform(0.5, 1.5), 0.0, 2.0))
-                p3 = p2 + p_persist  * float(np.clip(rng.uniform(0.5, 1.5), 0.0, 2.0))
+                j1 = float(np.clip(rng.uniform(0.5, 1.5), 0.0, 2.0))
+                j2 = float(np.clip(rng.uniform(0.5, 1.5), 0.0, 2.0))
+                j3 = float(np.clip(rng.uniform(0.5, 1.5), 0.0, 2.0))
+                p1 *= j1
+                p2 = p1 + p_leveloff * j2
+                p3 = p2 + p_persist  * j3
             u = rng.uniform()
             if u < p1:
                 mode = "OPPOSITE"
@@ -386,20 +412,19 @@ if submitted:
             vs_ca[hold_win] = 0.0
         elif mode == "PERSIST":
             vs_ca[:] = np.clip(vs_ca, -250.0, +250.0)
-        # Perception noise for surrogate
+        # -------- Surrogate decision (Phase 1): use NOISY perception + proper predicted miss
         vs_pl_noisy, vs_ca_noisy = apply_surveillance_noise(rng, times, vs_pl, vs_ca, p_miss=p_miss)
-        # --- Surrogate RA stream (override allowed) ---
-        evs = surrogate_decision_stream(
-            times, vs_pl_noisy, vs_ca_noisy, t_cpa_s=tgo, resp_thr=resp_thr,
-            intruder_delay_s=cat_td_k, noncomp_grace_s=2.0, ta_only=(mode=="TA_ONLY")
+        z_pl_dec = integrate_altitude_from_vs(times, vs_pl_noisy)
+        z_ca_dec = integrate_altitude_from_vs(times, vs_ca_noisy)
+        sep_now_dec = h0 + (z_pl_dec - z_ca_dec)
+        evs, t_strengthen = surrogate_decision_stream(
+            times, vs_pl_noisy, vs_ca_noisy, sep_now_dec,
+            t_cpa_s=tgo, alim_ft=alim_ft, resp_thr=resp_thr
         )
         eventtype_first = evs[0][0] if evs else "NONE"
         eventtime_first = evs[0][1] if evs else np.nan
         eventcause_first= evs[0][2] if evs else "N/A"
-        eventtype_final = evs[-1][0] if evs else "NONE"
-        eventtime_final = evs[-1][1] if evs else np.nan
-        eventcause_final= evs[-1][2] if evs else "N/A"
-        # --- Strengthen kinematics: escalate CAT VS after first Strengthen ---
+        # -------- Apply Strengthen rate step-up to CAT BEFORE late monitoring
         if any(e[0] == "STRENGTHEN" for e in evs):
             t_ev = next(e[1] for e in evs if e[0]=="STRENGTHEN")
             post_mask = (times > t_ev)
@@ -410,13 +435,32 @@ if submitted:
             v_after  = np.minimum(a * te, v_target) / MS_PER_FPM
             v_after *= -1  # CAT descends
             vs_ca[post_mask] = v_after[post_mask]
-        # Integrate for CPA and "ANY (pred-CPA, both-responding)"
+        # -------- Surrogate late monitoring (Phase 2) on NOISY perception of the strengthened profile
+        vs_pl_noisy2, vs_ca_noisy2 = apply_surveillance_noise(rng, times, vs_pl, vs_ca, p_miss=p_miss)
+        z_pl_dec2 = integrate_altitude_from_vs(times, vs_pl_noisy2)
+        z_ca_dec2 = integrate_altitude_from_vs(times, vs_ca_noisy2)
+        sep_now_dec2 = h0 + (z_pl_dec2 - z_ca_dec2)
+        evs = late_override_monitor(
+            evs, t_strengthen, times, vs_pl_noisy2, vs_ca_noisy2, sep_now_dec2,
+            t_cpa_s=tgo, alim_ft=alim_ft, resp_thr=resp_thr,
+            intruder_delay_s=cat_td_k, noncomp_grace_s=2.0, ta_only=(mode=="TA_ONLY")
+        )
+        eventtype_final = evs[-1][0] if evs else "NONE"
+        eventtime_final = evs[-1][1] if evs else np.nan
+        eventcause_final= evs[-1][2] if evs else "N/A"
+        # -------- Metrics on FINAL commanded (non-noisy) profiles (post Strengthen)
         z_pl = integrate_altitude_from_vs(times, vs_pl)
         z_ca = integrate_altitude_from_vs(times, vs_ca)
         sep_now = h0 + (z_pl - z_ca)                  # algebraic separation now (ft)
         tgo_series = (tgo - times).clip(min=0.0)
         pred_miss_series = np.abs(sep_now + ((vs_pl - vs_ca) * (tgo_series/60.0)))
         # BOTH-compliant start for "ANY"
+        def first_compliance_time(times, vs_fpm, sense, thr=DEFAULT_RESP_THRESH_FPM):
+            ok = (vs_fpm * sense) >= thr
+            if ok.any():
+                idx = np.argmax(ok)
+                return times[idx]
+            return np.inf
         t_own_ok = first_compliance_time(times, vs_pl, +1, thr=resp_thr)
         t_int_ok = first_compliance_time(times, vs_ca, -1, thr=resp_thr)
         start_t  = max(t_own_ok, t_int_ok) + 0.5
@@ -454,6 +498,7 @@ if _has and _df is not None:
     # KPIs with Wilson 95% CI (final event)
     k_rev = int((df['eventtype']=="REVERSE").sum())
     k_str = int((df['eventtype']=="STRENGTHEN").sum())
+    k_none= int((df['eventtype']=="NONE").sum())
     k_cpa = int(df['ALIMbreach_CPA'].sum())
     k_any = int(df['ALIMbreach_ANY_predCPA'].sum())
     p_rev = (k_rev/n) if n else 0.0; lo_rev, hi_rev = wilson_ci(k_rev, n)
