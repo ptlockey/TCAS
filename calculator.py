@@ -33,7 +33,7 @@ G = 9.80665
 FT_PER_M = 3.28084
 MS_PER_FPM = 0.00508
 DEFAULT_ALIM_FT = 600.0
-DEFAULT_RESP_THRESH_FPM = 300.0      # EUROCONTROL/IATA "meaningful response" threshold
+DEFAULT_RESP_THRESH_FPM = 300.0
 ALIM_MARGIN_FT = 100.0
 Z_95 = 1.96
 # Performance-limited (PL) — FIXED as per requirement
@@ -83,10 +83,7 @@ def integrate_altitude_from_vs(times_s: np.ndarray, vs_fpm: np.ndarray) -> np.nd
 # Atmosphere: IAS -> TAS (ISA approx for FL150–FL300)
 # -----------------------------
 def ias_to_tas(ias_kt: float, pressure_alt_ft: float) -> float:
-    """
-    Approximate TAS ≈ IAS / sqrt(sigma), sigma ≈ (1 - 6.875e-6 * h)^4.256
-    for troposphere (good enough for FL150–FL300). Guard against negatives.
-    """
+    """Approximate TAS ≈ IAS / sqrt(sigma), sigma ≈ (1 - 6.875e-6 * h)^4.256 for troposphere."""
     sigma = (1.0 - 6.875e-6 * pressure_alt_ft)**4.256
     sigma = max(1e-3, sigma)
     return ias_kt / np.sqrt(sigma)
@@ -119,7 +116,7 @@ def sample_tgo_with_trigger(rng, scenario, tgo_geom, FL_pl, FL_cat, cap_s=60.0):
     base = {"Head-on": (25.0, 5.0), "Crossing": (22.0, 6.0), "Overtaking": (30.0, 8.0)}
     mu, sd = base.get(scenario, (25.0, 6.0))
     if FL_pl >= 250 and FL_cat >= 250:
-        mu += 2.0   # earlier alerting at higher FL (operationally plausible surrogate)  # EUROCONTROL ACAS II Guide
+        mu += 2.0   # earlier alerting at higher FL (operationally plausible surrogate)
     lo, hi = 12.0, min(tgo_geom if tgo_geom is not None else cap_s, cap_s)
     if hi <= lo:
         return float(max(8.0, min(tgo_geom or 30.0, cap_s)))
@@ -384,16 +381,13 @@ if submitted:
         # Time series (base, coordinated)
         times, vs_pl = vs_time_series(tgo, dt, pl_td_k, pl_ag_k, PL_VS_FPM, sense=+1, cap_fpm=PL_VS_CAP)
         _,     vs_ca = vs_time_series(tgo, dt, cat_td_k, cat_ag_k, cat_vs,     sense=-1, cap_fpm=cat_cap)
-        # -----------------------------
         # Intruder non-compliance mode selection (mutually exclusive)
-        # -----------------------------
         mode = "BASE"
         if ta_only:
             mode = "TA_ONLY"
         else:
             p1, p2, p3 = p_opposite, p_opposite + p_leveloff, p_opposite + p_leveloff + p_persist
             if jitter:
-                # jitter ±50%
                 p1 *= float(np.clip(rng.uniform(0.5, 1.5), 0.0, 2.0))
                 p2 = p1 + p_leveloff * float(np.clip(rng.uniform(0.5, 1.5), 0.0, 2.0))
                 p3 = p2 + p_persist  * float(np.clip(rng.uniform(0.5, 1.5), 0.0, 2.0))
@@ -523,14 +517,15 @@ if st.session_state["has_results"] and st.session_state["df"] is not None:
             tick.set_rotation(20)
         st.pyplot(fig_bar)
     # Intruder mode bar
-    mode_counts = view["intruder_mode"].value_counts()
-    if len(mode_counts):
-        fig_mode, ax_mode = plt.subplots(figsize=(6,3))
-        ax_mode.bar(mode_counts.index, mode_counts.values, color="#7f7f7f")
-        ax_mode.set_ylabel("Count"); ax_mode.set_title("Intruder modes in this view")
-        for tick in ax_mode.get_xticklabels():
-            tick.set_rotation(20)
-        st.pyplot(fig_mode)
+    if "intruder_mode" in view.columns:
+        mode_counts = view["intruder_mode"].value_counts()
+        if len(mode_counts):
+            fig_mode, ax_mode = plt.subplots(figsize=(6,3))
+            ax_mode.bar(mode_counts.index, mode_counts.values, color="#7f7f7f")
+            ax_mode.set_ylabel("Count"); ax_mode.set_title("Intruder modes in this view")
+            for tick in ax_mode.get_xticklabels():
+                tick.set_rotation(20)
+            st.pyplot(fig_mode)
     # Min separation histogram (ANY post-engagement)
     fig_miss, ax_miss = plt.subplots(figsize=(6,3))
     ax_miss.hist(view["minSepPostEng_ft"], bins=30)
@@ -566,7 +561,7 @@ if st.session_state["has_results"] and st.session_state["df"] is not None:
         """Minimal re-run for a single sweep step, reusing current UI settings."""
         rng = np.random.default_rng(int(base_seed))
         data_local = []
-        # cache priors
+        # cache priors and override the one being swept
         priors = dict(p_opposite=p_opposite, p_leveloff=p_leveloff, p_persist=p_persist)
         priors[sweep_param] = float(param_value)
         for kk in range(int(runs_per_step)):
@@ -574,7 +569,7 @@ if st.session_state["has_results"] and st.session_state["df"] is not None:
             FL_pl, FL_cat, h0loc = sample_altitudes_and_h0(rng, h0_mean, h0_sd, h0_lo, h0_hi)
             PL_TAS = ias_to_tas(PL_IAS_KT, FL_pl * 100.0)
             CAT_TAS = float(rng.uniform(min(cat_tas_min, cat_tas_max), max(cat_tas_min, cat_tas_max)))
-            # Headings & geometry (reuse scenario & ranges; use random headings)
+            # Headings & geometry
             if scenario == "Custom":
                 h1l = rng.uniform(hdg1_min, hdg1_max); h2l = rng.uniform(hdg2_min, hdg2_max)
             else:
@@ -596,7 +591,7 @@ if st.session_state["has_results"] and st.session_state["df"] is not None:
             # Time series
             timesl, vs_pl_l = vs_time_series(tgol, dt, pl_td_l, pl_ag_l, PL_VS_FPM, sense=+1, cap_fpm=PL_VS_CAP)
             _,     vs_ca_l = vs_time_series(tgol, dt, cat_td_l, cat_ag_l, cat_vs, sense=-1, cap_fpm=cat_cap)
-            # Mode selection (mutually exclusive); TA_ONLY honors top precedence
+            # Mode selection (mutually exclusive)
             model = "BASE"
             if ta_only:
                 model = "TA_ONLY"
@@ -669,234 +664,6 @@ if st.session_state["has_results"] and st.session_state["df"] is not None:
         ax_sw.plot(st.session_state["sweep"]["param"], 100*st.session_state["sweep"]["P_any"], label="P(ALIM ANY post-eng) %")
         ax_sw.plot(st.session_state["sweep"]["param"], 100*st.session_state["sweep"]["P_cpa"], label="P(ALIM @CPA) %")
         ax_sw.set_xlabel(sweep_param); ax_sw.set_ylabel("Probability (%)")
-        ax_sw.grid(True, alpha=0.3); ax_sw.legend()
-        st.pyplot(fig_sw)
-else:
-# -----------------------------
-# Results / Explore (no rerun) — reads from state
-# -----------------------------
-if st.session_state["has_results"] and st.session_state["df"] is not None:
-    df = st.session_state["df"]
-    n = len(df)
-    # KPIs (with Wilson 95% CIs)
-    k_rev = int((df['eventtype'] == "REVERSE").sum())
-    k_str = int((df['eventtype'] == "STRENGTHEN").sum())
-    k_cpa = int(df['ALIMbreach_CPA'].sum())
-    k_any = int(df['ALIMbreach_ANY_postEng'].sum())
-    def wilson_ci(k, n, z=1.96):
-        if n <= 0:
-            return (0.0, 0.0)
-        phat = k / n
-        denom = 1.0 + (z**2)/n
-        center = (phat + (z**2)/(2*n)) / denom
-        half = z * np.sqrt((phat*(1-phat) + (z**2)/(4*n))/n) / denom
-        return (max(0.0, center - half), min(1.0, center + half))
-    p_rev = k_rev/n; lo_rev, hi_rev = wilson_ci(k_rev, n)
-    p_str = k_str/n; lo_str, hi_str = wilson_ci(k_str, n)
-    p_cpa = k_cpa/n; lo_cpa, hi_cpa = wilson_ci(k_cpa, n)
-    p_any = k_any/n; lo_any, hi_any = wilson_ci(k_any, n)
-    k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("P(Reversal)",   f"{100*p_rev:,.2f}%  [{100*lo_rev:,.2f}–{100*hi_rev:,.2f}%]")
-    k2.metric("P(Strengthen)", f"{100*p_str:,.2f}%  [{100*lo_str:,.2f}–{100*hi_str:,.2f}%]")
-    k3.metric("Mean RR",        f"{df['unresolvedRRpct'].mean():.3f}%")
-    k4.metric("P(ALIM @CPA)",  f"{100*p_cpa:,.2f}%  [{100*lo_cpa:,.2f}–{100*hi_cpa:,.2f}%]")
-    k5.metric("P(ALIM ANY post-eng)", f"{100*p_any:,.2f}%  [{100*lo_any:,.2f}–{100*hi_any:,.2f}%]")
-    # Explore filters (do not rerun batch)
-    st.sidebar.subheader("Explore batch")
-    tgo_lo, tgo_hi = st.sidebar.slider(
-        "tgo window (s)",
-        float(max(8.0, df["tgos"].min())),
-        float(df["tgos"].max()),
-        (float(df["tgos"].min()), float(df["tgos"].max()))
-    )
-    only_rev  = st.sidebar.checkbox("Only reversals", value=False)
-    only_bANY = st.sidebar.checkbox("Only ALIM-breach ANY (post-eng)", value=False)
-    view = df[df["tgos"].between(tgo_lo, tgo_hi)]
-    if only_rev:
-        view = view[view["eventtype"] == "REVERSE"]
-    if only_bANY:
-        view = view[view["ALIMbreach_ANY_postEng"] == True]
-    st.subheader("Preview of results")
-    st.dataframe(view.head(200), use_container_width=True)
-    # ECDF of unresolved RR
-    vals = view["unresolvedRRpct"].dropna().values
-    if len(vals):
-        x = np.sort(vals); y = np.arange(1, len(x)+1)/len(x)
-        fig_ecdf, ax_ecdf = plt.subplots(figsize=(6,3))
-        ax_ecdf.plot(x, y)
-        ax_ecdf.set_xlabel("Unresolved RR (%)"); ax_ecdf.set_ylabel("ECDF")
-        ax_ecdf.grid(True, alpha=0.3)
-        st.pyplot(fig_ecdf)
-    # tgo hist by event type
-    fig_hist, ax_hist = plt.subplots(figsize=(6,3))
-    for lab in ["STRENGTHEN", "REVERSE", "NONE"]:
-        sub = view[view["eventtype"] == lab]["tgos"]
-        if len(sub):
-            ax_hist.hist(sub, bins=24, histtype="step", label=lab)
-    ax_hist.set_xlabel("tgo (s)"); ax_hist.set_ylabel("Count"); ax_hist.grid(True, alpha=0.3)
-    ax_hist.legend()
-    st.pyplot(fig_hist)
-    # Event cause bar
-    cause_counts = view["eventcause"].value_counts()
-    if len(cause_counts):
-        fig_bar, ax_bar = plt.subplots(figsize=(6,3))
-        ax_bar.bar(cause_counts.index, cause_counts.values)
-        ax_bar.set_ylabel("Count"); ax_bar.set_title("Event causes")
-        for tick in ax_bar.get_xticklabels():
-            tick.set_rotation(20)
-        st.pyplot(fig_bar)
-    # Intruder mode bar
-    if "intruder_mode" in view.columns:
-        mode_counts = view["intruder_mode"].value_counts()
-        if len(mode_counts):
-            fig_mode, ax_mode = plt.subplots(figsize=(6,3))
-            ax_mode.bar(mode_counts.index, mode_counts.values, color="#7f7f7f")
-            ax_mode.set_ylabel("Count"); ax_mode.set_title("Intruder modes in this view")
-            for tick in ax_mode.get_xticklabels():
-                tick.set_rotation(20)
-            st.pyplot(fig_mode)
-    # Min separation histogram (ANY post-engagement)
-    fig_miss, ax_miss = plt.subplots(figsize=(6,3))
-    ax_miss.hist(view["minSepPostEng_ft"], bins=30)
-    ax_miss.axvline(alim_ft, color="k", ls="--", alpha=0.7, label=f"ALIM={alim_ft:.0f} ft")
-    ax_miss.set_xlabel("Minimum vertical miss (ft) after engagement")
-    ax_miss.set_ylabel("Count")
-    ax_miss.grid(True, alpha=0.3)
-    ax_miss.legend()
-    st.pyplot(fig_miss)
-    # Downloads
-    st.subheader("Download batch data")
-    csv_buf = io.BytesIO()
-    csv_buf.write(df.to_csv(index=False).encode("utf-8"))
-    csv_buf.seek(0)
-    st.download_button(
-        label="Download CSV",
-        data=csv_buf,
-        file_name="tcas_batch_results.csv",
-        mime="text/csv",
-        key="dl_csv"
-    )
-    # -----------------------------
-    # Sensitivity sweep tool (one parameter)
-    # -----------------------------
-    st.markdown("---")
-    st.header("Sensitivity sweep (one parameter)")
-    with st.expander("Run a quick sweep"):
-        sweep_param = st.selectbox("Parameter to sweep",
-                                   ["p_opposite", "p_leveloff", "p_persist"])
-        sweep_lo = st.number_input("Sweep start", value=0.00, step=0.005)
-        sweep_hi = st.number_input("Sweep end",   value=0.05, step=0.005)
-        sweep_steps = st.number_input("Steps", min_value=2, max_value=50, value=6, step=1)
-        runs_per_step= st.number_input("Runs per step", min_value=200, max_value=20000, value=2000, step=200)
-        seed0 = st.number_input("Sweep base seed", value=100, step=1)
-        go_sweep = st.button("Run sweep")
-    def run_one_step(param_value, base_seed):
-        """Minimal re-run for a single sweep step, reusing current UI settings."""
-        rng = np.random.default_rng(int(base_seed))
-        data_local = []
-        # cache priors
-        priors = dict(p_opposite=p_opposite, p_leveloff=p_leveloff, p_persist=p_persist)
-        priors[sweep_param] = float(param_value)
-        for kk in range(int(runs_per_step)):
-            # Altitudes & h0
-            FL_pl, FL_cat, h0loc = sample_altitudes_and_h0(rng, h0_mean, h0_sd, h0_lo, h0_hi)
-            PL_TAS = ias_to_tas(PL_IAS_KT, FL_pl * 100.0)
-            CAT_TAS = float(rng.uniform(min(cat_tas_min, cat_tas_max), max(cat_tas_min, cat_tas_max)))
-            # Headings & geometry
-            if scenario == "Custom":
-                h1l = rng.uniform(hdg1_min, hdg1_max); h2l = rng.uniform(hdg2_min, hdg2_max)
-            else:
-                h1l, h2l = sample_headings(rng, scenario, 0.0, 360.0, rel_min, rel_max)
-            r0l = float(rng.uniform(min(r_min, r_max), max(r_min, r_max)))
-            vcll = relative_closure_kt(PL_TAS, h1l, CAT_TAS, h2l)
-            tgeom = time_to_go_from_geometry(r0l, vcll)
-            # tgo
-            if ra_trigger_mode.startswith("Scenario"):
-                tgol = sample_tgo_with_trigger(rng, scenario, tgeom, FL_pl, FL_cat, cap_s=tgo_cap)
-            else:
-                tgol = float(np.clip(tgeom if tgeom is not None else 30.0, 8.0, tgo_cap))
-            # Responses
-            pl_td_l, pl_ag_l = PL_DELAY_S, PL_ACCEL_G
-            if use_distrib:
-                cat_td_l, cat_ag_l = sample_pilot_response_cat(rng)
-            else:
-                cat_td_l, cat_ag_l = cat_td_nom, cat_ag_nom
-            # Time series
-            timesl, vs_pl_l = vs_time_series(tgol, dt, pl_td_l, pl_ag_l, PL_VS_FPM, sense=+1, cap_fpm=PL_VS_CAP)
-            _,     vs_ca_l = vs_time_series(tgol, dt, cat_td_l, cat_ag_l, cat_vs, sense=-1, cap_fpm=cat_cap)
-            # Mode selection (mutually exclusive); TA_ONLY has top precedence
-            model = "BASE"
-            if ta_only:
-                model = "TA_ONLY"
-            else:
-                p1 = priors["p_opposite"]; p2 = p1 + priors["p_leveloff"]; p3 = p2 + priors["p_persist"]
-                if jitter:
-                    p1 *= float(np.clip(rng.uniform(0.5, 1.5), 0.0, 2.0))
-                    p2 = p1 + priors["p_leveloff"] * float(np.clip(rng.uniform(0.5, 1.5), 0.0, 2.0))
-                    p3 = p2 + priors["p_persist"]  * float(np.clip(rng.uniform(0.5, 1.5), 0.0, 2.0))
-                u = rng.uniform()
-                if u < p1:
-                    model = "OPPOSITE"
-                elif u < p2:
-                    model = "LEVELOFF"
-                elif u < p3:
-                    model = "PERSIST"
-            # Apply non-compliance
-            if model == "TA_ONLY":
-                timesl = np.arange(0.0, tgol + 1e-9, dt)
-                vs_ca_l = np.zeros_like(timesl) + rng.normal(0.0, 100.0, size=timesl.size)
-            elif model == "OPPOSITE":
-                wrong_win = (timesl >= cat_td_l) & (timesl <= cat_td_l + 6.0)
-                vs_ca_l[wrong_win] = -vs_ca_l[wrong_win]
-            elif model == "LEVELOFF":
-                hold_win = (timesl >= cat_td_l) & (timesl <= cat_td_l + 8.0)
-                vs_ca_l[hold_win] = 0.0
-            elif model == "PERSIST":
-                vs_ca_l[:] = np.clip(vs_ca_l, -250.0, +250.0)
-            # Surrogate perception noise
-            vs_pl_noisy, vs_ca_noisy = apply_surveillance_noise(rng, timesl, vs_pl_l, vs_ca_l, p_miss=p_miss)
-            # Integrate & metrics
-            z_pl_l = integrate_altitude_from_vs(timesl, vs_pl_l)
-            z_ca_l = integrate_altitude_from_vs(timesl, vs_ca_l)
-            sep_series_l = np.abs(h0loc + (z_pl_l - z_ca_l))
-            miss_cpa_l = float(np.abs(h0loc + (z_pl_l[-1] - z_ca_l[-1])))
-            breach_cpa_l = (miss_cpa_l < alim_ft)
-            engage_t_l = min(pl_td_l, cat_td_l) + 0.5
-            msk = timesl >= engage_t_l
-            min_sep_post_l = float(np.min(sep_series_l[msk])) if msk.any() else float(np.min(sep_series_l))
-            breach_post_l = (min_sep_post_l < alim_ft)
-            # Events
-            evl = surrogate_decision_with_cause(timesl, vs_pl_noisy, vs_ca_noisy, t_cpa_s=tgol, resp_thr=resp_thr)
-            evt = evl[0][0] if evl else "NONE"
-            data_local.append((evt, breach_cpa_l, breach_post_l))
-        # Aggregate step KPIs
-        d = pd.DataFrame(data_local, columns=["evt", "bCPA", "bANY"])
-        nloc = len(d)
-        krevl = int((d["evt"] == "REVERSE").sum())
-        kstrl = int((d["evt"] == "STRENGTHEN").sum())
-        kcpl  = int(d["bCPA"].sum()); kanl = int(d["bANY"].sum())
-        return dict(
-            param=float(param_value),
-            P_rev=krevl/nloc, P_str=kstrl/nloc, P_cpa=kcpl/nloc, P_any=kanl/nloc
-        )
-    if "go_sweep" in locals() and go_sweep:
-        params = np.linspace(sweep_lo, sweep_hi, int(sweep_steps))
-        out = []
-        for i, pv in enumerate(params):
-            out.append(run_one_step(pv, seed0 + i))
-        sweep_df = pd.DataFrame(out)
-        st.session_state["sweep"] = sweep_df
-        st.success("Sweep completed.")
-    if st.session_state.get("sweep") is not None:
-        st.subheader("Sweep results")
-        st.dataframe(st.session_state["sweep"], use_container_width=True)
-        # Plot chosen KPI vs param
-        fig_sw, ax_sw = plt.subplots(figsize=(6,3))
-        ax_sw.plot(st.session_state["sweep"]["param"], 100*st.session_state["sweep"]["P_rev"], label="P(Reversal) %")
-        ax_sw.plot(st.session_state["sweep"]["param"], 100*st.session_state["sweep"]["P_str"], label="P(Strengthen) %")
-        ax_sw.plot(st.session_state["sweep"]["param"], 100*st.session_state["sweep"]["P_any"], label="P(ALIM ANY post-eng) %")
-        ax_sw.plot(st.session_state["sweep"]["param"], 100*st.session_state["sweep"]["P_cpa"], label="P(ALIM @CPA) %")
-        ax_sw.set_xlabel("sweep param"); ax_sw.set_ylabel("Probability (%)")
         ax_sw.grid(True, alpha=0.3); ax_sw.legend()
         st.pyplot(fig_sw)
 else:
