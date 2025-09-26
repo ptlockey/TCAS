@@ -1,9 +1,10 @@
-# app_v3.2.py
+# app_v3.2.1.py
 # ACAS/TCAS v7.1 — Residual Risk & RA Taxonomy (Batch Monte Carlo, regulator-ready)
-# PL fixed (0.1 s, 0.10 g, 500 fpm; 120 KIAS -> TAS by FL), CAT varies.
-# Surrogate reversal only after intruder delay + grace; TA-only disables non-compliance reversal.
-# "ANY" metric = minimum predicted CPA miss (post-engagement), not instantaneous separation.
-# Stateful UI; no trailing "else:" at EOF.
+# Fixes:
+#  - Two-stage RA logic: Strengthen may be overridden by a later Reversal (non-compliance or very-late shortfall)
+#  - "ANY" metric: min predicted CPA miss starts only after BOTH aircraft are meaningfully responding (>=300 fpm) + 0.5 s
+#  - Strengthen escalates CAT target VS (+500 fpm, capped) post-event, with ramp at cat_accel_g
+#  - No trailing else:, robust % formatting
 import io
 import numpy as np
 import pandas as pd
@@ -31,7 +32,6 @@ PL_IAS_KT  = 120.0
 # Kinematics
 # -----------------------------
 def delta_h_piecewise(t_cpa_s: float, t_delay_s: float, a_g: float, v_f_fpm: float) -> float:
-    """Vertical displacement (FEET) from RA to CPA: delay -> ramp -> capped."""
     a = a_g * G
     v_f_mps = v_f_fpm * MS_PER_FPM
     if t_cpa_s <= t_delay_s:
@@ -44,7 +44,6 @@ def delta_h_piecewise(t_cpa_s: float, t_delay_s: float, a_g: float, v_f_fpm: flo
         dh_m = 0.5 * a * (t_ramp**2) + v_f_mps * (t - t_ramp)
     return dh_m * FT_PER_M
 def vs_time_series(t_end_s, dt_s, t_delay_s, a_g, v_f_fpm, sense, cap_fpm=None):
-    """Return VS profile (fpm) with delay, ramp, then cap; signed with sense (+climb/-descend)."""
     a = a_g * G
     v_target = v_f_fpm if cap_fpm is None else min(v_f_fpm, cap_fpm)
     times = np.arange(0.0, t_end_s + 1e-9, dt_s)
@@ -58,7 +57,6 @@ def vs_time_series(t_end_s, dt_s, t_delay_s, a_g, v_f_fpm, sense, cap_fpm=None):
             vs[i] = sense * (v_mps / MS_PER_FPM)
     return times, vs
 def integrate_altitude_from_vs(times_s: np.ndarray, vs_fpm: np.ndarray) -> np.ndarray:
-    """Integrate VS (fpm) to altitude (ft); z(0)=0."""
     dt = np.diff(times_s, prepend=times_s[0])
     fps = vs_fpm / 60.0
     z = np.cumsum(fps * dt)
@@ -68,7 +66,6 @@ def integrate_altitude_from_vs(times_s: np.ndarray, vs_fpm: np.ndarray) -> np.nd
 # Atmosphere: IAS -> TAS (ISA approx for FL150–FL300)
 # -----------------------------
 def ias_to_tas(ias_kt: float, pressure_alt_ft: float) -> float:
-    """TAS ≈ IAS / sqrt(sigma), sigma ≈ (1 - 6.875e-6 * h)^4.256; guard against negatives."""
     sigma = (1.0 - 6.875e-6 * pressure_alt_ft)**4.256
     sigma = max(1e-3, sigma)
     return ias_kt / np.sqrt(sigma)
@@ -76,13 +73,11 @@ def ias_to_tas(ias_kt: float, pressure_alt_ft: float) -> float:
 # Geometry & RA→CPA handling
 # -----------------------------
 def relative_closure_kt(v1_kt, hdg1_deg, v2_kt, hdg2_deg) -> float:
-    """Scalar closure speed (kt) from headings/speeds."""
     th1, th2 = np.deg2rad(hdg1_deg), np.deg2rad(hdg2_deg)
     v1 = np.array([v1_kt*np.sin(th1), v1_kt*np.cos(th1)])
     v2 = np.array([v2_kt*np.sin(th2), v2_kt*np.cos(th2)])
     return float(np.linalg.norm(v1 - v2))
 def time_to_go_from_geometry(r0_nm, v_closure_kt):
-    """RA->CPA time from pure geometry (s); None if no closure."""
     if v_closure_kt <= 1e-6:
         return None
     return 3600.0 * (r0_nm / v_closure_kt)
@@ -97,7 +92,7 @@ def sample_headings(rng, scenario, hdg1_min, hdg1_max, rel_min=None, rel_max=Non
         h2 = (h1 + dirsign * rel) % 360.0
     return h1, h2
 def sample_tgo_with_trigger(rng, scenario, tgo_geom, FL_pl, FL_cat, cap_s=60.0):
-    """Scenario-calibrated RA->CPA (typical en-route windows), +2s if both >= FL250."""
+    # Scenario-calibrated windows (typical en-route), +2s if both >= FL250
     base = {"Head-on": (25.0, 5.0), "Crossing": (22.0, 6.0), "Overtaking": (30.0, 8.0)}
     mu, sd = base.get(scenario, (25.0, 6.0))
     if FL_pl >= 250 and FL_cat >= 250:
@@ -110,7 +105,7 @@ def sample_tgo_with_trigger(rng, scenario, tgo_geom, FL_pl, FL_cat, cap_s=60.0):
 # Baseline Δh for risk scaling (ACASA unresolved 1.1%)
 # -----------------------------
 def baseline_dh_ft(t_cpa_s, mode="IDEAL"):
-    if mode == "IDEAL":
+    if mode.startswith("IDEAL"):
         return delta_h_piecewise(t_cpa_s, t_delay_s=1.0, a_g=0.25, v_f_fpm=1500)
     else:
         return delta_h_piecewise(t_cpa_s, t_delay_s=5.0, a_g=0.25, v_f_fpm=1500)
@@ -118,7 +113,6 @@ def baseline_dh_ft(t_cpa_s, mode="IDEAL"):
 # Pilot response sampling (CAT only)
 # -----------------------------
 def sample_pilot_response_cat(rng):
-    """Mixture: 70% on-time (4.5±1.0 s, 0.25±0.03 g), 30% late/weak (8.5±1.5 s, 0.10±0.02 g)."""
     u = rng.uniform()
     if u < 0.70:
         delay = max(0.0, rng.normal(4.5, 1.0))
@@ -147,16 +141,21 @@ def apply_surveillance_noise(rng, times, vs_own, vs_int, p_miss=0.0):
             vs_int_noisy[i] = vs_int_noisy[i-1]
     return vs_own_noisy, vs_int_noisy
 # -----------------------------
-# Surrogate RA taxonomy (v7.1) — patched gating & TA-only handling
+# Surrogate RA taxonomy (v7.1) — two-stage (override allowed)
 # -----------------------------
 def dwell_fn(tgo_s: float) -> float:
     return float(np.clip(0.8 + 0.05 * (tgo_s - 12.0), 0.8, 1.8))
 def predicted_dh_linear(vs_own_fpm, vs_int_fpm, t_go_s):
-    """Predicted CPA miss distance if current VS held."""
     return abs((vs_own_fpm - vs_int_fpm) * (t_go_s / 60.0))
 def compliant_in_sense(vs_fpm, sense, thr=DEFAULT_RESP_THRESH_FPM):
     return (vs_fpm * sense) >= thr
-def surrogate_decision_with_cause(
+def first_compliance_time(times, vs_fpm, sense, thr=DEFAULT_RESP_THRESH_FPM):
+    ok = (vs_fpm * sense) >= thr
+    if ok.any():
+        idx = np.argmax(ok)
+        return times[idx]
+    return np.inf
+def surrogate_decision_stream(
     times, vs_own, vs_int, t_cpa_s,
     resp_thr=DEFAULT_RESP_THRESH_FPM,
     intruder_delay_s=5.0,
@@ -164,36 +163,46 @@ def surrogate_decision_with_cause(
     ta_only=False
 ):
     """
-    First event decision (allow one):
-      - REVERSE if intruder non-compliant after (delay + grace) and dwell (own compliant)  [disabled if TA-only]
-      - STRENGTHEN if predicted ALIM shortfall early
-      - REVERSE if predicted ALIM shortfall very late (t_go < 6 s)
+    Return a list of events [(type, t, cause)], allowing Strengthen to be overridden by a later Reversal.
+      - Early: if predicted ALIM shortfall and not late -> STRENGTHEN
+      - Override: if (not TA-only) intruder non-compliant after (delay+grace) & dwell -> REVERSE
+      - Late: if predicted shortfall with t_go<6s -> REVERSE
     """
     events = []
     min_eval_time = 0.2
+    have_strengthen = False
     for i, t in enumerate(times):
         t_go = max(0.0, t_cpa_s - t)
         if t_go <= 0.0:
             break
         own_ok = compliant_in_sense(vs_own[i], +1, thr=resp_thr)
-        if not ta_only:
-            int_ok = compliant_in_sense(vs_int[i], -1, thr=resp_thr)
-            if (
-                (t >= min_eval_time)
-                and (t >= intruder_delay_s + noncomp_grace_s)
-                and (not int_ok) and own_ok
-                and (t >= dwell_fn(t_go))
-            ):
-                events.append(("REVERSE", float(t), "INTRUDER_NONCOMPL_AFTER_DWELL"))
-                break
-        if t >= min_eval_time and own_ok:
-            dh_pred = predicted_dh_linear(vs_own[i], vs_int[i], t_go)
-            if dh_pred < (DEFAULT_ALIM_FT - ALIM_MARGIN_FT):
-                if t_go < 6.0:
+        int_ok = compliant_in_sense(vs_int[i], -1, thr=resp_thr)
+        # 1) If no event yet, we may issue an early Strengthen (preferred) or a late Reversal
+        if not events:
+            if t >= min_eval_time and own_ok:
+                dh_pred = predicted_dh_linear(vs_own[i], vs_int[i], t_go)
+                if dh_pred < (DEFAULT_ALIM_FT - ALIM_MARGIN_FT):
+                    if t_go < 6.0:
+                        events.append(("REVERSE", float(t), "ALIM_SHORTFALL_LATE"))
+                        break
+                    else:
+                        events.append(("STRENGTHEN", float(t), "ALIM_SHORTFALL_EARLY"))
+                        have_strengthen = True
+                        # keep monitoring for possible override
+                        continue
+        # 2) After Strengthen, allow override Reversal if intruder proves non-compliant (v7.1 intent)
+        if have_strengthen:
+            # Non-compliance override (disabled for TA-only)
+            if (not ta_only) and t >= (intruder_delay_s + noncomp_grace_s) and own_ok and (t >= dwell_fn(t_go)):
+                if not int_ok:
+                    events.append(("REVERSE", float(t), "INTRUDER_NONCOMPL_AFTER_DWELL"))
+                    break
+            # Very-late shortfall override
+            if own_ok:
+                dh_pred = predicted_dh_linear(vs_own[i], vs_int[i], t_go)
+                if (t_go < 6.0) and (dh_pred < (DEFAULT_ALIM_FT - ALIM_MARGIN_FT)):
                     events.append(("REVERSE", float(t), "ALIM_SHORTFALL_LATE"))
-                else:
-                    events.append(("STRENGTHEN", float(t), "ALIM_SHORTFALL_EARLY"))
-                break
+                    break
     return events
 # -----------------------------
 # Wilson 95% CI for probabilities
@@ -222,7 +231,7 @@ st.markdown(
     """
 Two aircraft in **Class A (FL150–FL300)**: one **performance‑limited (PL)** is **fixed** (0.1 s / 0.10 g / 500 fpm; **120 KIAS** → TAS by FL); the **CAT** varies (speed, headings, delay, accel).
 We compute: **P(Strengthen)**, **P(Reversal)**, **Mean unresolved RR** (Δh‑ratio × **1.1%**),
-and **P(ALIM breach)** at **CPA** and **ANY (predicted‑CPA post‑engagement)**.
+and **P(ALIM breach)** at **CPA** and **ANY (pred‑CPA, both‑responding)**.
 """
 )
 with st.sidebar:
@@ -240,7 +249,7 @@ st.subheader("CAT (non‑PL) parameters — variable in batch")
 c1, c2, c3 = st.columns(3)
 with c1:
     cat_vs = st.number_input("CAT target VS (fpm)", value=1500, step=100)
-    cat_cap = st.number_input("CAT performance cap (fpm)", value=1500, step=100)
+    cat_cap = st.number_input("CAT performance cap (fpm)", value=2000, step=100)  # allow >1500 for strengthen
 with c2:
     cat_ag_nom = st.number_input("CAT accel nominal (g)", value=0.25, step=0.01, format="%.2f")
     cat_td_nom = st.number_input("CAT delay nominal (s)", value=5.0, step=0.5)
@@ -250,7 +259,7 @@ with c3:
 with st.expander("RA trigger & Surveillance/noise"):
     ra_trigger_mode = st.selectbox("RA→CPA mode",
                                    ["Scenario-calibrated (recommended)", "Geometry-derived"])
-    tgo_cap = st.number_input("Max RA→CPA cap (s)", value=60.0, step=5.0, min_value=15.0)
+    tgo_cap = st.number_input("Max RA→CPA cap (s)", value=60.0, step=5.0, min_value=10.0)
     p_miss = st.slider("P(missing cycle) per time-step (surrogate only)", 0.0, 0.20, 0.00, 0.01)
 with st.expander("Intruder (CAT) non-compliance priors"):
     p_opposite  = st.slider("P(opposite-sense) per run", 0.0, 0.10, 0.02, 0.005)
@@ -277,7 +286,7 @@ tgo_geom_spot= time_to_go_from_geometry(8.0, v_clos_spot) or 30.0
 t_cpa_spot   = float(min(max(20.0, tgo_geom_spot), tgo_cap))
 dh_pl_ft = delta_h_piecewise(t_cpa_spot, PL_DELAY_S, PL_ACCEL_G, PL_VS_FPM)
 dh_cat_ft= delta_h_piecewise(t_cpa_spot, cat_td_nom, cat_ag_nom, cat_vs)
-dh_base  = baseline_dh_ft(t_cpa_spot, mode="IDEAL" if baseline.startswith("IDEAL") else "STANDARD")
+dh_base  = baseline_dh_ft(t_cpa_spot, mode=baseline)
 ratio    = (dh_base / dh_pl_ft) if dh_pl_ft > 1e-6 else np.nan
 unres_rr = 1.1 * ratio
 spot_tab = pd.DataFrame({
@@ -334,7 +343,7 @@ if submitted:
         if ra_trigger_mode.startswith("Scenario"):
             tgo = sample_tgo_with_trigger(rng, scenario, tgo_geom, FL_pl, FL_cat, cap_s=tgo_cap)
         else:
-            tgo = float(np.clip(tgo_geom if tgo_geom is not None else 30.0, 8.0, tgo_cap))
+            tgo = float(np.clip(tgo_geom if tgo_geom is not None else 30.0, 6.0, tgo_cap))
         pl_td_k = PL_DELAY_S
         pl_ag_k = PL_ACCEL_G
         if use_distrib:
@@ -343,19 +352,18 @@ if submitted:
             cat_td_k, cat_ag_k = cat_td_nom, cat_ag_nom
         dh_pl = delta_h_piecewise(tgo, pl_td_k, pl_ag_k, PL_VS_FPM)
         dh_cat= delta_h_piecewise(tgo, cat_td_k, cat_ag_k, cat_vs)
-        dh_base = baseline_dh_ft(tgo, mode="IDEAL" if baseline.startswith("IDEAL") else "STANDARD")
+        dh_base = baseline_dh_ft(tgo, mode=baseline)
         ratio = (dh_base / dh_pl) if dh_pl > 1e-6 else np.nan
         unres_rr = 1.1 * ratio
         times, vs_pl = vs_time_series(tgo, dt, pl_td_k, pl_ag_k, PL_VS_FPM, sense=+1, cap_fpm=PL_VS_CAP)
         _,     vs_ca = vs_time_series(tgo, dt, cat_td_k, cat_ag_k, cat_vs, sense=-1, cap_fpm=cat_cap)
-        # Intruder mode selection (mutually exclusive; TA_ONLY precedence)
+        # Intruder non-compliance: mutually exclusive, TA_ONLY precedence
         mode = "BASE"
         if ta_only:
             mode = "TA_ONLY"
         else:
             p1, p2, p3 = p_opposite, p_opposite + p_leveloff, p_opposite + p_leveloff + p_persist
             if jitter:
-                # jitter ±50%
                 p1 *= float(np.clip(rng.uniform(0.5, 1.5), 0.0, 2.0))
                 p2 = p1 + p_leveloff * float(np.clip(rng.uniform(0.5, 1.5), 0.0, 2.0))
                 p3 = p2 + p_persist  * float(np.clip(rng.uniform(0.5, 1.5), 0.0, 2.0))
@@ -366,7 +374,7 @@ if submitted:
                 mode = "LEVELOFF"
             elif u < p3:
                 mode = "PERSIST"
-        # Apply non-compliance modes
+        # Apply modes
         if mode == "TA_ONLY":
             times = np.arange(0.0, tgo + 1e-9, dt)
             vs_ca = np.zeros_like(times) + rng.normal(0.0, 100.0, size=times.size)
@@ -378,27 +386,45 @@ if submitted:
             vs_ca[hold_win] = 0.0
         elif mode == "PERSIST":
             vs_ca[:] = np.clip(vs_ca, -250.0, +250.0)
+        # Perception noise for surrogate
         vs_pl_noisy, vs_ca_noisy = apply_surveillance_noise(rng, times, vs_pl, vs_ca, p_miss=p_miss)
-        # Predicted CPA ANY (post-engagement)
-        z_pl = integrate_altitude_from_vs(times, vs_pl)
-        z_ca = integrate_altitude_from_vs(times, vs_ca)
-        sep_now = h0 + (z_pl - z_ca)                           # ft
-        tgo_series = (tgo - times).clip(min=0.0)
-        pred_miss_series = np.abs(sep_now + ( (vs_pl - vs_ca) * (tgo_series/60.0) ))
-        engage_t = min(pl_td_k, cat_td_k) + 0.5
-        mask = (times >= engage_t)
-        min_pred_miss = float(np.min(pred_miss_series[mask])) if mask.any() else float(np.min(pred_miss_series))
-        miss_cpa   = float(np.abs(h0 + (z_pl[-1] - z_ca[-1])))
-        breach_cpa = (miss_cpa < alim_ft)
-        breach_any = (min_pred_miss < alim_ft)  # MAIN "ANY" metric (predicted-CPA, post-engagement)
-        # Surrogate event
-        ev = surrogate_decision_with_cause(
+        # --- Surrogate RA stream (override allowed) ---
+        evs = surrogate_decision_stream(
             times, vs_pl_noisy, vs_ca_noisy, t_cpa_s=tgo, resp_thr=resp_thr,
             intruder_delay_s=cat_td_k, noncomp_grace_s=2.0, ta_only=(mode=="TA_ONLY")
         )
-        evtype = ev[0][0] if ev else "NONE"
-        evtime = ev[0][1] if ev else np.nan
-        evcause= ev[0][2] if ev else "N/A"
+        eventtype_first = evs[0][0] if evs else "NONE"
+        eventtime_first = evs[0][1] if evs else np.nan
+        eventcause_first= evs[0][2] if evs else "N/A"
+        eventtype_final = evs[-1][0] if evs else "NONE"
+        eventtime_final = evs[-1][1] if evs else np.nan
+        eventcause_final= evs[-1][2] if evs else "N/A"
+        # --- Strengthen kinematics: escalate CAT VS after first Strengthen ---
+        if any(e[0] == "STRENGTHEN" for e in evs):
+            t_ev = next(e[1] for e in evs if e[0]=="STRENGTHEN")
+            post_mask = (times > t_ev)
+            te = np.clip(times - t_ev, 0, None)
+            a = cat_ag_k * G
+            new_target_fpm = min(cat_cap, cat_vs + 500.0)  # +500 fpm
+            v_target = new_target_fpm * MS_PER_FPM
+            v_after  = np.minimum(a * te, v_target) / MS_PER_FPM
+            v_after *= -1  # CAT descends
+            vs_ca[post_mask] = v_after[post_mask]
+        # Integrate for CPA and "ANY (pred-CPA, both-responding)"
+        z_pl = integrate_altitude_from_vs(times, vs_pl)
+        z_ca = integrate_altitude_from_vs(times, vs_ca)
+        sep_now = h0 + (z_pl - z_ca)                  # algebraic separation now (ft)
+        tgo_series = (tgo - times).clip(min=0.0)
+        pred_miss_series = np.abs(sep_now + ((vs_pl - vs_ca) * (tgo_series/60.0)))
+        # BOTH-compliant start for "ANY"
+        t_own_ok = first_compliance_time(times, vs_pl, +1, thr=resp_thr)
+        t_int_ok = first_compliance_time(times, vs_ca, -1, thr=resp_thr)
+        start_t  = max(t_own_ok, t_int_ok) + 0.5
+        mask_any = (times >= start_t)
+        min_pred_miss = float(np.min(pred_miss_series[mask_any])) if mask_any.any() else float(np.min(pred_miss_series))
+        miss_cpa   = float(np.abs(h0 + (z_pl[-1] - z_ca[-1])))
+        breach_cpa = (miss_cpa < alim_ft)
+        breach_any = (min_pred_miss < alim_ft)  # "ANY (pred-CPA, both-responding)"
         data.append({
             "run": k + 1,
             "scenario": scenario,
@@ -406,11 +432,12 @@ if submitted:
             "PLhdg": h1, "CAThdg": h2, "R0NM": r0, "closurekt": vcl, "tgos": tgo,
             "plDelay": pl_td_k, "plAccel_g": pl_ag_k, "catDelay": cat_td_k, "catAccel_g": cat_ag_k,
             "intruder_mode": mode,
-            "h0ft": h0, "missCPAft": miss_cpa, "minPredMiss_postEng_ft": min_pred_miss,
+            "h0ft": h0, "missCPAft": miss_cpa, "minPredMiss_bothResp_ft": min_pred_miss,
             "ALIMbreach_CPA": breach_cpa, "ALIMbreach_ANY_predCPA": breach_any,
             "dhPLft": dh_pl, "dhCATft": dh_cat, "dhbaselineft": dh_base,
             "ratiobaseoverPL": ratio, "unresolvedRRpct": unres_rr,
-            "eventtype": evtype, "eventtimes": evtime, "eventcause": evcause,
+            "eventtype_first": eventtype_first, "eventtime_first": eventtime_first, "eventcause_first": eventcause_first,
+            "eventtype": eventtype_final, "eventtimes": eventtime_final, "eventcause": eventcause_final,
         })
     df = pd.DataFrame(data)
     st.session_state["df"] = df
@@ -424,29 +451,29 @@ _df  = st.session_state.get("df")
 if _has and _df is not None:
     df = _df
     n = len(df)
-    # KPIs with Wilson 95% CI
+    # KPIs with Wilson 95% CI (final event)
     k_rev = int((df['eventtype']=="REVERSE").sum())
     k_str = int((df['eventtype']=="STRENGTHEN").sum())
     k_cpa = int(df['ALIMbreach_CPA'].sum())
     k_any = int(df['ALIMbreach_ANY_predCPA'].sum())
-    p_rev = k_rev/n if n else 0.0; lo_rev, hi_rev = wilson_ci(k_rev, n)
-    p_str = k_str/n if n else 0.0; lo_str, hi_str = wilson_ci(k_str, n)
-    p_cpa = k_cpa/n if n else 0.0; lo_cpa, hi_cpa = wilson_ci(k_cpa, n)
-    p_any = k_any/n if n else 0.0; lo_any, hi_any = wilson_ci(k_any, n)
+    p_rev = (k_rev/n) if n else 0.0; lo_rev, hi_rev = wilson_ci(k_rev, n)
+    p_str = (k_str/n) if n else 0.0; lo_str, hi_str = wilson_ci(k_str, n)
+    p_cpa = (k_cpa/n) if n else 0.0; lo_cpa, hi_cpa = wilson_ci(k_cpa, n)
+    p_any = (k_any/n) if n else 0.0; lo_any, hi_any = wilson_ci(k_any, n)
     k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("P(Reversal)",                f"{100*p_rev:,.2f}%  [{100*lo_rev:,.2f}–{100*hi_rev:,.2f}%]")
     k2.metric("P(Strengthen)",              f"{100*p_str:,.2f}%  [{100*lo_str:,.2f}–{100*hi_str:,.2f}%]")
     k3.metric("Mean RR",                    f"{df['unresolvedRRpct'].mean():.3f}%")
     k4.metric("P(ALIM breach @CPA)",        f"{100*p_cpa:,.2f}%  [{100*lo_cpa:,.2f}–{100*hi_cpa:,.2f}%]")
-    k5.metric("P(ALIM ANY (pred-CPA, post)",f"{100*p_any:,.2f}%  [{100*lo_any:,.2f}–{100*hi_any:,.2f}%]")
+    k5.metric("P(ALIM ANY pred-CPA, both)", f"{100*p_any:,.2f}%  [{100*lo_any:,.2f}–{100*hi_any:,.2f}%]")
     # Explore filters
     st.sidebar.subheader("Explore batch")
     tgo_lo, tgo_hi = st.sidebar.slider("tgo window (s)",
-                                       float(max(8.0, df["tgos"].min())),
+                                       float(max(6.0, df["tgos"].min())),
                                        float(df["tgos"].max()),
                                        (float(df["tgos"].min()), float(df["tgos"].max())))
     only_rev  = st.sidebar.checkbox("Only reversals", value=False)
-    only_bANY = st.sidebar.checkbox("Only ALIM-breach ANY (pred-CPA, post)", value=False)
+    only_bANY = st.sidebar.checkbox("Only ALIM-breach ANY (pred-CPA, both)", value=False)
     view = df[df["tgos"].between(tgo_lo, tgo_hi)]
     if only_rev:
         view = view[view["eventtype"] == "REVERSE"]
@@ -463,7 +490,7 @@ if _has and _df is not None:
         ax_ecdf.set_xlabel("Unresolved RR (%)"); ax_ecdf.set_ylabel("ECDF")
         ax_ecdf.grid(True, alpha=0.3)
         st.pyplot(fig_ecdf)
-    # tgo hist by event type
+    # tgo hist by event (final)
     fig_hist, ax_hist = plt.subplots(figsize=(6,3))
     for lab in ["STRENGTHEN", "REVERSE", "NONE"]:
         sub = view[view["eventtype"] == lab]["tgos"]
@@ -472,12 +499,12 @@ if _has and _df is not None:
     ax_hist.set_xlabel("tgo (s)"); ax_hist.set_ylabel("Count"); ax_hist.grid(True, alpha=0.3)
     ax_hist.legend()
     st.pyplot(fig_hist)
-    # Event cause bar
+    # Event cause bar (final)
     cause_counts = view["eventcause"].value_counts()
     if len(cause_counts):
         fig_bar, ax_bar = plt.subplots(figsize=(6,3))
         ax_bar.bar(cause_counts.index, cause_counts.values)
-        ax_bar.set_ylabel("Count"); ax_bar.set_title("Event causes")
+        ax_bar.set_ylabel("Count"); ax_bar.set_title("Final RA causes")
         for tick in ax_bar.get_xticklabels():
             tick.set_rotation(20)
         st.pyplot(fig_bar)
@@ -491,12 +518,12 @@ if _has and _df is not None:
             for tick in ax_mode.get_xticklabels():
                 tick.set_rotation(20)
             st.pyplot(fig_mode)
-    # Minimum predicted CPA miss histogram (post-engagement)
-    if "minPredMiss_postEng_ft" in view.columns:
+    # Min predicted CPA miss histogram (post both-responding)
+    if "minPredMiss_bothResp_ft" in view.columns:
         fig_miss, ax_miss = plt.subplots(figsize=(6,3))
-        ax_miss.hist(view["minPredMiss_postEng_ft"], bins=30)
+        ax_miss.hist(view["minPredMiss_bothResp_ft"], bins=30)
         ax_miss.axvline(alim_ft, color="k", ls="--", alpha=0.7, label=f"ALIM={alim_ft:.0f} ft")
-        ax_miss.set_xlabel("Min predicted CPA miss (ft) after engagement")
+        ax_miss.set_xlabel("Min predicted CPA miss (ft) after BOTH responding")
         ax_miss.set_ylabel("Count")
         ax_miss.grid(True, alpha=0.3)
         ax_miss.legend()
