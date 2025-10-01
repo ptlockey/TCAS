@@ -23,7 +23,7 @@ DEFAULT_RESP_THRESH_FPM = 300.0
 ALIM_MARGIN_FT = 100.0
 Z_95 = 1.96
 # Performance-limited (PL) — FIXED
-PL_DELAY_S = 0.1
+PL_DELAY_S = 0.9
 PL_ACCEL_G = 0.10
 PL_VS_FPM  = 500
 PL_VS_CAP  = 500
@@ -372,7 +372,7 @@ if st.button("Calculate (single run)"):
     dh_base   = baseline_dh_ft(t_cpa_spot, mode=baseline)
     ratio     = (dh_base / dh_pl_ft) if dh_pl_ft > 1e-9 else np.inf
     unres_rr  = 1.1 * ratio
-    alim_breach = bool(miss_cpa < alim)
+    alim_breach = bool(miss_cpa < alim_ft)
 
     # Plot altitude diagram
     fig, ax = plt.subplots(figsize=(7,3.6))
@@ -388,7 +388,7 @@ if st.button("Calculate (single run)"):
     # Report metrics
     st.markdown(f"**Δh_PL** = {dh_pl_ft:,.0f} ft, **Δh_CAT** = {dh_cat_ft:,.0f} ft, **Δh_baseline** = {dh_base:,.0f} ft")
     st.markdown(f"**RR (unresolved, scaled)** ≈ {unres_rr:,.3f}%  (ratio baseline/PL = {ratio:,.3f})")
-    st.markdown(f"**Miss @CPA** = {miss_cpa:,.0f} ft — **ALIM breach @CPA**: {'Yes' if alim_breach else 'No'} (ALIM = {alim:.0f} ft)")
+    st.markdown(f"**Miss @CPA** = {miss_cpa:,.0f} ft — **ALIM breach @CPA**: {'Yes' if alim_breach else 'No'} (ALIM = {alim_ft:.0f} ft)")
 else:
     st.info("Set inputs, then press **Calculate (single run)** to see the altitude diagram and metrics.")
 
@@ -661,3 +661,4 @@ if _has and _df is not None:
 # Independent hint (no trailing else)
 if not (_has and _df is not None):
     st.info("Run a batch to see results. Use the **form** above; results will persist while you explore.")
+
