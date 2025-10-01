@@ -1,18 +1,26 @@
-# ACAS/TCAS v7.1 — Residual Risk & RA Taxonomy (Batch Monte Carlo, regulator-ready) # Fixes vs v3.2.1:
+# app_v3.2.2.py
+# ACAS/TCAS v7.1 — Residual Risk & RA Taxonomy (Batch Monte Carlo, regulator-ready)
+# Fixes vs v3.2.1:
 #  - Late reversal uses proper predicted CPA miss (includes current separation) — no more "reverse all"
-#  - Late monitoring sees the post-Strengthen intruder profile (CAT rate step-up applied before monitor) #  - Dwell for non-compliance override is measured since Strengthen, not from t=0 #  - Surrogate monitor uses UI ALIM (passed in), not a fixed constant import io import numpy as np import pandas as pd import matplotlib
+#  - Late monitoring sees the post-Strengthen intruder profile (CAT rate step-up applied before monitor)
+#  - Dwell for non-compliance override is measured since Strengthen, not from t=0
+#  - Surrogate monitor uses UI ALIM (passed in), not a fixed constant
+import io
+import numpy as np
+import pandas as pd
+import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import streamlit as st
-
-# --- Helpers for h0 policy (cap by vertical separation minima) --- def _min_sep_ft_for_band(max_fl: int, policy: str = "FL290STEP") -> int:
-    """Return cap for h0 based on band policy.
-    FL290STEP: 1000 ft below FL290; 2000 ft at/above FL290.
-    RVSM: 1000 ft up to FL410; 2000 ft above FL410.
-    """
-    if policy.upper().startswith("RVSM"):
-        return 1000 if max_fl <= 410 else 2000
-    return 1000 if max_fl < 290 else 2000 # ----------------------------- # Constants & helpers # ----------------------------- G = 9.80665 FT_PER_M = 3.28084 MS_PER_FPM = 0.00508 DEFAULT_ALIM_FT = 600.0 DEFAULT_RESP_THRESH_FPM = 300.0 ALIM_MARGIN_FT = 100.0
+# -----------------------------
+# Constants & helpers
+# -----------------------------
+G = 9.80665
+FT_PER_M = 3.28084
+MS_PER_FPM = 0.00508
+DEFAULT_ALIM_FT = 600.0
+DEFAULT_RESP_THRESH_FPM = 300.0
+ALIM_MARGIN_FT = 100.0
 Z_95 = 1.96
 # Performance-limited (PL) — FIXED
 PL_DELAY_S = 0.1
@@ -55,7 +63,9 @@ def integrate_altitude_from_vs(times_s: np.ndarray, vs_fpm: np.ndarray) -> np.nd
     z[0] = 0.0
     return z
 # -----------------------------
-# Atmosphere: IAS -> TAS (ISA approx for FL150–FL300) # ----------------------------- def ias_to_tas(ias_kt: float, pressure_alt_ft: float) -> float:
+# Atmosphere: IAS -> TAS (ISA approx for FL150–FL300)
+# -----------------------------
+def ias_to_tas(ias_kt: float, pressure_alt_ft: float) -> float:
     sigma = (1.0 - 6.875e-6 * pressure_alt_ft)**4.256
     sigma = max(1e-3, sigma)
     return ias_kt / np.sqrt(sigma)
@@ -66,10 +76,12 @@ def relative_closure_kt(v1_kt, hdg1_deg, v2_kt, hdg2_deg) -> float:
     th1, th2 = np.deg2rad(hdg1_deg), np.deg2rad(hdg2_deg)
     v1 = np.array([v1_kt*np.sin(th1), v1_kt*np.cos(th1)])
     v2 = np.array([v2_kt*np.sin(th2), v2_kt*np.cos(th2)])
-    return float(np.linalg.norm(v1 - v2)) def time_to_go_from_geometry(r0_nm, v_closure_kt):
+    return float(np.linalg.norm(v1 - v2))
+def time_to_go_from_geometry(r0_nm, v_closure_kt):
     if v_closure_kt <= 1e-6:
         return None
-    return 3600.0 * (r0_nm / v_closure_kt) def sample_headings(rng, scenario, hdg1_min, hdg1_max, rel_min=None, rel_max=None,
+    return 3600.0 * (r0_nm / v_closure_kt)
+def sample_headings(rng, scenario, hdg1_min, hdg1_max, rel_min=None, rel_max=None,
                     hdg2_min=None, hdg2_max=None):
     h1 = rng.uniform(hdg1_min, hdg1_max)
     if scenario == "Custom":
@@ -88,11 +100,19 @@ def sample_tgo_with_trigger(rng, scenario, tgo_geom, FL_pl, FL_cat, cap_s=60.0):
     lo, hi = 12.0, min(tgo_geom if tgo_geom is not None else cap_s, cap_s)
     if hi <= lo:
         return float(max(8.0, min(tgo_geom or 30.0, cap_s)))
-    return float(np.clip(rng.normal(mu, sd), lo, hi)) # ----------------------------- # Baseline Δh for risk scaling (ACASA unresolved 1.1%) # ----------------------------- def baseline_dh_ft(t_cpa_s, mode="IDEAL"):
+    return float(np.clip(rng.normal(mu, sd), lo, hi))
+# -----------------------------
+# Baseline Δh for risk scaling (ACASA unresolved 1.1%)
+# -----------------------------
+def baseline_dh_ft(t_cpa_s, mode="IDEAL"):
     if mode.startswith("IDEAL"):
         return delta_h_piecewise(t_cpa_s, t_delay_s=1.0, a_g=0.25, v_f_fpm=1500)
     else:
-        return delta_h_piecewise(t_cpa_s, t_delay_s=5.0, a_g=0.25, v_f_fpm=1500) # ----------------------------- # Pilot response sampling (CAT only) # ----------------------------- def sample_pilot_response_cat(rng):
+        return delta_h_piecewise(t_cpa_s, t_delay_s=5.0, a_g=0.25, v_f_fpm=1500)
+# -----------------------------
+# Pilot response sampling (CAT only)
+# -----------------------------
+def sample_pilot_response_cat(rng):
     u = rng.uniform()
     if u < 0.70:
         delay = max(0.0, rng.normal(4.5, 1.0))
@@ -104,27 +124,15 @@ def sample_tgo_with_trigger(rng, scenario, tgo_geom, FL_pl, FL_cat, cap_s=60.0):
 # -----------------------------
 # Altitudes & initial vertical miss
 # -----------------------------
-def sample_altitudes_and_h0(rng, h0_mean=250.0, h0_sd=100.0, h0_lo=0.0, h0_hi=2000.0,
-                             policy: str = "FL290STEP"):
-    # First pick a base FL; then cap h0 by band; then set the other FL so |ΔFL| ≈ h0/100
-    FL_pl_base  = int(rng.integers(150, 301))
-    # Decide cap by band using base FL for now (we'll also clamp by bounds when we place the intruder)
-    cap = float(_min_sep_ft_for_band(FL_pl_base, policy=policy))
-    h0 = float(np.clip(rng.normal(h0_mean, h0_sd), max(h0_lo, 0.0), min(h0_hi, cap)))
-    # Convert h0 (ft) to FL units (100 ft per FL)
-    diff_FL = max(1, int(round(h0 / 100.0)))
-    # Randomly put CAT above or below
-    sign = 1 if rng.uniform() < 0.5 else -1
-    FL_cat_cand = FL_pl_base + sign * diff_FL
-    # Keep within bounds; if out, flip sign or clamp
-    if not (150 <= FL_cat_cand <= 300):
-        FL_cat_cand = FL_pl_base - sign * diff_FL
-        if not (150 <= FL_cat_cand <= 300):
-            FL_cat_cand = min(300, max(150, FL_pl_base + sign * diff_FL))
-    FL_pl, FL_cat = FL_pl_base, int(FL_cat_cand)
+def sample_altitudes_and_h0(rng, h0_mean=250.0, h0_sd=100.0, h0_lo=100.0, h0_hi=500.0):
+    FL_pl  = int(rng.integers(150, 301))
+    FL_cat = int(rng.integers(150, 301))
+    h0 = float(np.clip(rng.normal(h0_mean, h0_sd), h0_lo, h0_hi))
     return FL_pl, FL_cat, h0
 # -----------------------------
-# Surveillance/noise (for surrogate perception only) # ----------------------------- def apply_surveillance_noise(rng, times, vs_own, vs_int, p_miss=0.0):
+# Surveillance/noise (for surrogate perception only)
+# -----------------------------
+def apply_surveillance_noise(rng, times, vs_own, vs_int, p_miss=0.0):
     vs_own_noisy = vs_own.copy()
     vs_int_noisy = vs_int.copy()
     for i in range(1, len(times)):
@@ -133,10 +141,14 @@ def sample_altitudes_and_h0(rng, h0_mean=250.0, h0_sd=100.0, h0_lo=0.0, h0_hi=20
             vs_int_noisy[i] = vs_int_noisy[i-1]
     return vs_own_noisy, vs_int_noisy
 # -----------------------------
-# Surrogate RA taxonomy (v7.1) — two-stage (override allowed) # ----------------------------- def dwell_fn(tgo_s: float) -> float:
-    return float(np.clip(0.8 + 0.05 * (tgo_s - 12.0), 0.8, 1.8)) def predicted_miss_at_cpa(sep_now_ft: float, vs_own_fpm: float, vs_int_fpm: float, t_go_s: float) -> float:
+# Surrogate RA taxonomy (v7.1) — two-stage (override allowed)
+# -----------------------------
+def dwell_fn(tgo_s: float) -> float:
+    return float(np.clip(0.8 + 0.05 * (tgo_s - 12.0), 0.8, 1.8))
+def predicted_miss_at_cpa(sep_now_ft: float, vs_own_fpm: float, vs_int_fpm: float, t_go_s: float) -> float:
     """Predicted |vertical miss at CPA| given current separation and current vertical rates."""
-    return abs(sep_now_ft + (vs_own_fpm - vs_int_fpm) * (t_go_s / 60.0)) def surrogate_decision_stream(
+    return abs(sep_now_ft + (vs_own_fpm - vs_int_fpm) * (t_go_s / 60.0))
+def surrogate_decision_stream(
     times: np.ndarray,
     vs_own: np.ndarray,
     vs_int: np.ndarray,
@@ -221,7 +233,11 @@ def wilson_ci(k, n, z=Z_95):
     denom = 1.0 + (z*z)/n
     center = (phat + (z*z)/(2*n)) / denom
     half = z * np.sqrt((phat*(1-phat) + (z*z)/(4*n))/n) / denom
-    return (max(0.0, center - half), min(1.0, center + half)) # ----------------------------- # Streamlit state # ----------------------------- def init_state():
+    return (max(0.0, center - half), min(1.0, center + half))
+# -----------------------------
+# Streamlit state
+# -----------------------------
+def init_state():
     if "df" not in st.session_state:
         st.session_state["df"] = None
     if "has_results" not in st.session_state:
@@ -230,10 +246,12 @@ init_state()
 # -----------------------------
 # UI
 # -----------------------------
-st.title("ACAS/TCAS v7.1 — Residual Risk & RA Taxonomy (Batch Monte Carlo)") st.markdown(
+st.title("ACAS/TCAS v7.1 — Residual Risk & RA Taxonomy (Batch Monte Carlo)")
+st.markdown(
     """
 Two aircraft in **Class A (FL150–FL300)**: one **performance‑limited (PL)** is **fixed** (0.1 s / 0.10 g / 500 fpm; **120 KIAS** → TAS by FL); the **CAT** varies (speed, headings, delay, accel).
-We compute: **P(Strengthen)**, **P(Reversal)**, **Mean unresolved RR** (Δh‑ratio × **1.1%**), and **P(ALIM breach)** at **CPA** and **ANY (pred‑CPA, both‑responding)**.
+We compute: **P(Strengthen)**, **P(Reversal)**, **Mean unresolved RR** (Δh‑ratio × **1.1%**),
+and **P(ALIM breach)** at **CPA** and **ANY (pred‑CPA, both‑responding)**.
 """
 )
 with st.sidebar:
@@ -243,19 +261,27 @@ with st.sidebar:
                             ["IDEAL 1500 fpm (ACASA 2002)", "STANDARD 1500 fpm (EUROCONTROL 2018)"])
     dt = st.number_input("Time step (s)", value=0.1, step=0.1, format="%.1f")
     resp_thr = st.number_input("Meaningful response threshold (fpm)",
-                               value=300.0, step=50.0) st.subheader("Performance‑limited (PL) — fixed")
+                               value=300.0, step=50.0)
+st.subheader("Performance‑limited (PL) — fixed")
 st.write(f"- Delay: **{PL_DELAY_S:.1f} s**, Accel: **{PL_ACCEL_G:.2f} g**, Target VS: **±{PL_VS_FPM} fpm** (cap {PL_VS_CAP})")
-st.write(f"- Speed: **{PL_IAS_KT:.0f} KIAS** → TAS computed per‑run from sampled FL") st.subheader("CAT (non‑PL) parameters — variable in batch") c1, c2, c3 = st.columns(3) with c1:
+st.write(f"- Speed: **{PL_IAS_KT:.0f} KIAS** → TAS computed per‑run from sampled FL")
+st.subheader("CAT (non‑PL) parameters — variable in batch")
+c1, c2, c3 = st.columns(3)
+with c1:
     cat_vs = st.number_input("CAT target VS (fpm)", value=1500, step=100)
-    cat_cap = st.number_input("CAT performance cap (fpm)", value=2000, step=100)  # allow >1500 for strengthen with c2:
+    cat_cap = st.number_input("CAT performance cap (fpm)", value=2000, step=100)  # allow >1500 for strengthen
+with c2:
     cat_ag_nom = st.number_input("CAT accel nominal (g)", value=0.25, step=0.01, format="%.2f")
-    cat_td_nom = st.number_input("CAT delay nominal (s)", value=5.0, step=0.5) with c3:
+    cat_td_nom = st.number_input("CAT delay nominal (s)", value=5.0, step=0.5)
+with c3:
     cat_tas_min = st.number_input("CAT TAS min (kt)", value=420.0, step=5.0)
-    cat_tas_max = st.number_input("CAT TAS max (kt)", value=470.0, step=5.0) with st.expander("RA trigger & Surveillance/noise"):
+    cat_tas_max = st.number_input("CAT TAS max (kt)", value=470.0, step=5.0)
+with st.expander("RA trigger & Surveillance/noise"):
     ra_trigger_mode = st.selectbox("RA→CPA mode",
                                    ["Scenario-calibrated (recommended)", "Geometry-derived"])
     tgo_cap = st.number_input("Max RA→CPA cap (s)", value=60.0, step=5.0, min_value=10.0)
-    p_miss = st.slider("P(missing cycle) per time-step (surrogate only)", 0.0, 0.20, 0.00, 0.01) with st.expander("Intruder (CAT) non-compliance priors"):
+    p_miss = st.slider("P(missing cycle) per time-step (surrogate only)", 0.0, 0.20, 0.00, 0.01)
+with st.expander("Intruder (CAT) non-compliance priors"):
     p_opposite  = st.slider("P(opposite-sense) per run", 0.0, 0.10, 0.02, 0.005)
     p_leveloff  = st.slider("P(level-off / follow ATC) per run", 0.0, 0.10, 0.03, 0.005)
     p_persist   = st.slider("P(persistent weak <300 fpm) per run", 0.0, 0.05, 0.01, 0.005)
@@ -267,48 +293,28 @@ with st.expander("Initial vertical miss (at RA)"):
     h0_lo   = st.number_input("h0 min (ft)", value=100.0, step=25.0)
     h0_hi   = st.number_input("h0 max (ft)", value=500.0, step=25.0)
 # -----------------------------
-
-# Single-run encounter (deterministic) — post‑RA behaviour only st.markdown("### Single‑run encounter (deterministic) — post‑RA behaviour only")
-
-colA, colB, colC = st.columns([1,1,1])
-with colA:
-    spot_h0 = st.number_input("Initial vertical miss h0 (ft)", value=250.0, step=25.0, min_value=0.0) with colB:
-    t_cpa_spot = st.number_input("t_go to CPA (s)", value=45.0, step=1.0, min_value=6.0) with colC:
-    spot_dt = st.number_input("Time step, dt (s)", value=dt, step=0.05, format="%.2f", min_value=0.01)
-
-if st.button("Calculate (single run)"):
-    times_spot, vs_pl_spot = vs_time_series(t_cpa_spot, spot_dt, PL_DELAY_S, PL_ACCEL_G, PL_VS_FPM, sense=-1, cap_fpm=PL_VS_CAP)
-    _,         vs_ca_spot = vs_time_series(t_cpa_spot, spot_dt, cat_td_nom,  cat_ag_nom,  cat_vs,    sense=+1, cap_fpm=cat_cap)
-
-    z_pl_spot = integrate_altitude_from_vs(times_spot, vs_pl_spot)              # climb from 0
-    z_ca_spot = spot_h0 + integrate_altitude_from_vs(times_spot, vs_ca_spot)    # descend from +h0 (vs negative)
-
-    miss_cpa  = abs(z_ca_spot[-1] - z_pl_spot[-1])
-
-    dh_pl_ft  = delta_h_piecewise(t_cpa_spot, PL_DELAY_S, PL_ACCEL_G, PL_VS_FPM)
-    dh_cat_ft = delta_h_piecewise(t_cpa_spot, cat_td_nom,  cat_ag_nom,  cat_vs)
-    dh_base   = baseline_dh_ft(t_cpa_spot, mode=baseline)
-    ratio     = (dh_base / dh_pl_ft) if dh_pl_ft > 1e-9 else np.inf
-    unres_rr  = 1.1 * ratio
-    alim_breach = bool(miss_cpa < alim_ft)
-
-    fig, ax = plt.subplots(figsize=(7,3.6))
-    ax.plot(times_spot, z_pl_spot, label="PL altitude (ft) — climb")
-    ax.plot(times_spot, z_ca_spot, label="CAT altitude (ft) — descend")
-    ax.fill_between(times_spot, z_pl_spot - alim_ft, z_pl_spot + alim_ft, alpha=0.1, label=f"±ALIM ({alim_ft:.0f} ft)")
-    ax.axhline(0.0, linestyle="--", linewidth=1)
-    ax.set_xlabel("Time since RA trigger (s)")
-    ax.set_ylabel("Relative altitude (ft)")
-    ax.set_title("Single‑run altitude profiles to CPA (post‑RA)")
-    ax.legend(loc="best")
-    st.pyplot(fig)
-
-    st.markdown(f"**Δh_PL** = {dh_pl_ft:,.0f} ft, **Δh_CAT** = {dh_cat_ft:,.0f} ft, **Δh_baseline** = {dh_base:,.0f} ft")
-    st.markdown(f"**RR (unresolved, scaled)** ≈ {unres_rr:,.3f}%  (ratio baseline/PL = {ratio:,.3f})")
-    st.markdown(f"**Miss @CPA** = {miss_cpa:,.0f} ft — **ALIM breach @CPA**: {'Yes' if alim_breach else 'No'} (ALIM = {alim_ft:.0f} ft)")
-else:
-    st.info("Set h0, t_go, dt, then press **Calculate (single run)** to see post‑RA altitude traces and metrics.")
-
+# Single-run spot check
+# -----------------------------
+st.markdown("### Single‑run spot check")
+spot_FL_pl  = st.number_input("Spot FL (PL)",  value=200, step=10, min_value=150, max_value=300)
+spot_FL_cat = st.number_input("Spot FL (CAT)", value=200, step=10, min_value=150, max_value=300)
+spot_h0     = st.number_input("Spot initial vertical miss h0 (ft)", value=250.0, step=25.0)
+PL_TAS_spot  = ias_to_tas(PL_IAS_KT, spot_FL_pl * 100.0)
+CAT_TAS_spot = (cat_tas_min + cat_tas_max) / 2.0
+v_clos_spot  = relative_closure_kt(PL_TAS_spot, 0.0, CAT_TAS_spot, 180.0)
+tgo_geom_spot= time_to_go_from_geometry(8.0, v_clos_spot) or 30.0
+t_cpa_spot   = float(min(max(20.0, tgo_geom_spot), tgo_cap))
+dh_pl_ft = delta_h_piecewise(t_cpa_spot, PL_DELAY_S, PL_ACCEL_G, PL_VS_FPM)
+dh_cat_ft= delta_h_piecewise(t_cpa_spot, cat_td_nom, cat_ag_nom, cat_vs)
+dh_base  = baseline_dh_ft(t_cpa_spot, mode=baseline)
+ratio    = (dh_base / dh_pl_ft) if dh_pl_ft > 1e-6 else np.nan
+unres_rr = 1.1 * ratio
+spot_tab = pd.DataFrame({
+    "Aircraft": ["PL (ownship)", "CAT (intruder)", "Baseline"],
+    "Δh @ CPA (ft)": [dh_pl_ft, dh_cat_ft, dh_base]
+})
+st.dataframe(spot_tab, use_container_width=True)
+st.write(f"Scaled unresolved RR ≈ **{unres_rr:,.3f}%** (ratio {ratio:,.3f}); t_go≈**{t_cpa_spot:.1f}s**")
 # -----------------------------
 # Batch Monte Carlo — FORM
 # -----------------------------
@@ -335,7 +341,11 @@ with st.form("batch_form", clear_on_submit=False):
         else:
             rel_min, rel_max = 0.0, 30.0
     use_distrib = st.checkbox("CAT response: use mixture distributions (recommended)", value=True)
-    submitted = st.form_submit_button("Run batch") # ----------------------------- # Run batch # ----------------------------- if submitted:
+    submitted = st.form_submit_button("Run batch")
+# -----------------------------
+# Run batch
+# -----------------------------
+if submitted:
     rng = np.random.default_rng(int(seed))
     data = []
     for k in range(int(n_runs)):
@@ -368,8 +378,8 @@ with st.form("batch_form", clear_on_submit=False):
         ratio = (dh_base / dh_pl) if dh_pl > 1e-6 else np.nan
         unres_rr = 1.1 * ratio
         # VS time series (nominal commanded)
-        times, vs_pl = vs_time_series(tgo, dt, pl_td_k, pl_ag_k, PL_VS_FPM, sense=-1, cap_fpm=PL_VS_CAP)
-        _,     vs_ca = vs_time_series(tgo, dt, cat_td_k, cat_ag_k, cat_vs, sense=+1, cap_fpm=cat_cap)
+        times, vs_pl = vs_time_series(tgo, dt, pl_td_k, pl_ag_k, PL_VS_FPM, sense=+1, cap_fpm=PL_VS_CAP)
+        _,     vs_ca = vs_time_series(tgo, dt, cat_td_k, cat_ag_k, cat_vs, sense=-1, cap_fpm=cat_cap)
         # Intruder non-compliance: mutually exclusive, TA_ONLY precedence
         mode = "BASE"
         if ta_only:
@@ -456,8 +466,7 @@ with st.form("batch_form", clear_on_submit=False):
         start_t  = max(t_own_ok, t_int_ok) + 0.5
         mask_any = (times >= start_t)
         min_pred_miss = float(np.min(pred_miss_series[mask_any])) if mask_any.any() else float(np.min(pred_miss_series))
-        s0 = h0 if (FL_cat > FL_pl) else -h0
-        miss_cpa   = float(np.abs(s0 + (z_ca[-1] - z_pl[-1])))
+        miss_cpa   = float(np.abs(h0 + (z_pl[-1] - z_ca[-1])))
         breach_cpa = (miss_cpa < alim_ft)
         breach_any = (min_pred_miss < alim_ft)  # "ANY (pred-CPA, both-responding)"
         data.append({
@@ -477,7 +486,11 @@ with st.form("batch_form", clear_on_submit=False):
     df = pd.DataFrame(data)
     st.session_state["df"] = df
     st.session_state["has_results"] = True
-    st.success(f"Completed {len(df)} runs.") # ----------------------------- # Results / Explore (guard pattern — no trailing else) # ----------------------------- _has = bool(st.session_state.get("has_results"))
+    st.success(f"Completed {len(df)} runs.")
+# -----------------------------
+# Results / Explore (guard pattern — no trailing else)
+# -----------------------------
+_has = bool(st.session_state.get("has_results"))
 _df  = st.session_state.get("df")
 if _has and _df is not None:
     df = _df
@@ -567,7 +580,9 @@ if _has and _df is not None:
     csv_buf.seek(0)
     st.download_button(label="Download CSV", data=csv_buf,
                        file_name="tcas_batch_results.csv",
-                       mime="text/csv", key="dl_csv") # Independent hint (no trailing else) if not (_has and _df is not None):
+                       mime="text/csv", key="dl_csv")
+# Independent hint (no trailing else)
+if not (_has and _df is not None):
     st.info("Run a batch to see results. Use the **form** above; results will persist while you explore.")
 
 
