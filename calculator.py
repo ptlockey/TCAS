@@ -23,7 +23,7 @@ DEFAULT_RESP_THRESH_FPM = 300.0
 ALIM_MARGIN_FT = 100.0
 Z_95 = 1.96
 # Performance-limited (PL) — FIXED
-PL_DELAY_S = 0.1
+PL_DELAY_S = 0.9
 PL_ACCEL_G = 0.10
 PL_VS_FPM  = 500
 PL_VS_CAP  = 500
@@ -43,7 +43,7 @@ def delta_h_piecewise(t_cpa_s: float, t_delay_s: float, a_g: float, v_f_fpm: flo
     else:
         dh_m = 0.5 * a * (t_ramp**2) + v_f_mps * (t - t_ramp)
     return dh_m * FT_PER_M
-def vs_time_series(t_end_s, dt_s, t_delay_s, a_g, v_f_fpm, sense, cap_fpm=None):
+def vs_time_series(t_end_s, dt_s, t_delay_s, a_g, v_f_fpm, sense, cap_fpm=None, vs0_fpm=0.0):
     a = a_g * G
     v_target = v_f_fpm if cap_fpm is None else min(v_f_fpm, cap_fpm)
     times = np.arange(0.0, t_end_s + 1e-9, dt_s)
@@ -56,6 +56,55 @@ def vs_time_series(t_end_s, dt_s, t_delay_s, a_g, v_f_fpm, sense, cap_fpm=None):
             v_mps = min(a * te, v_target * MS_PER_FPM)
             vs[i] = sense * (v_mps / MS_PER_FPM)
     return times, vs
+
+# --- Initial-trajectory sampling & trajectory-aware sense selection ---
+def sample_initial_vs(rng, mode='Mixed', level_sd=50.0, climb_mean=1000.0, climb_sd=200.0, descend_mean=-1000.0, descend_sd=200.0):
+    if mode == 'Mostly level':
+        probs = (0.8, 0.1, 0.1)
+    elif mode == 'Aggressive':
+        probs = (0.4, 0.3, 0.3)
+    else:  # Mixed
+        probs = (0.6, 0.2, 0.2)
+    u = rng.uniform()
+    if u < probs[0]:
+        return float(rng.normal(0.0, level_sd))
+    elif u < probs[0] + probs[1]:
+        return float(rng.normal(climb_mean, climb_sd))
+    else:
+        return float(rng.normal(descend_mean, descend_sd))
+
+def choose_sense_from_trend(cat_above: bool, vz_pl0_fpm: float, vz_cat0_fpm: float, thr: float = 200.0, default_policy: str = 'High climbs, low descends'):
+    # Two complementary divergence policies:
+    #   A) High climbs / Low descends
+    #   B) High descends / Low climbs
+    high_is_cat = bool(cat_above)
+    a_high_cmd, a_low_cmd = +1, -1
+    b_high_cmd, b_low_cmd = -1, +1
+
+    # Current trends
+    def trend(v): return +1 if v >= thr else (-1 if v <= -thr else 0)
+    pl_trend  = trend(vz_pl0_fpm)
+    cat_trend = trend(vz_cat0_fpm)
+
+    # Alignment counts
+    if high_is_cat:
+        a_align = (cat_trend == a_high_cmd) + (pl_trend == a_low_cmd)
+        b_align = (cat_trend == b_high_cmd) + (pl_trend == b_low_cmd)
+    else:
+        a_align = (pl_trend == a_high_cmd) + (cat_trend == a_low_cmd)
+        b_align = (pl_trend == b_high_cmd) + (cat_trend == b_low_cmd)
+
+    use_a = (a_align > b_align) or (a_align == b_align and default_policy.startswith('High climbs'))
+
+    if high_is_cat:
+        # CAT is higher
+        sense_pl, sense_cat = (-1, +1) if use_a else (+1, -1)
+    else:
+        # PL is higher
+        sense_pl, sense_cat = (+1, -1) if use_a else (-1, +1)
+
+    return sense_pl, sense_cat
+
 def integrate_altitude_from_vs(times_s: np.ndarray, vs_fpm: np.ndarray) -> np.ndarray:
     dt = np.diff(times_s, prepend=times_s[0])
     fps = vs_fpm / 60.0
@@ -341,6 +390,9 @@ with st.form("batch_form", clear_on_submit=False):
         else:
             rel_min, rel_max = 0.0, 30.0
     use_distrib = st.checkbox("CAT response: use mixture distributions (recommended)", value=True)
+    init_mode_pl  = st.selectbox("PL initial trajectory", ["Mostly level","Mixed","Aggressive"], index=0)
+    init_mode_cat = st.selectbox("CAT initial trajectory", ["Mostly level","Mixed","Aggressive"], index=1)
+    default_policy = st.selectbox("Default divergence policy when trends conflict", ["High climbs, low descends","High descends, low climbs"], index=0)
     submitted = st.form_submit_button("Run batch")
 # -----------------------------
 # Run batch
@@ -379,10 +431,11 @@ if submitted:
         unres_rr = 1.1 * ratio
         # VS time series (nominal commanded)
         cat_above = (FL_cat > FL_pl) if (FL_cat != FL_pl) else (rng.uniform() < 0.5)
-        sense_pl = -1 if cat_above else +1
-        sense_ca = +1 if cat_above else -1
-        times, vs_pl = vs_time_series(tgo, dt, pl_td_k, pl_ag_k, PL_VS_FPM, sense=sense_pl, cap_fpm=PL_VS_CAP)
-        _,     vs_ca = vs_time_series(tgo, dt, cat_td_k, cat_ag_k, cat_vs, sense=sense_ca, cap_fpm=cat_cap)
+        vz_pl0  = sample_initial_vs(rng, mode=init_mode_pl)
+        vz_cat0 = sample_initial_vs(rng, mode=init_mode_cat)
+        sense_pl, sense_ca = choose_sense_from_trend(cat_above, vz_pl0, vz_cat0, thr=200.0, default_policy=default_policy)
+        times, vs_pl = vs_time_series(tgo, dt, pl_td_k, pl_ag_k, PL_VS_FPM, sense=sense_pl, cap_fpm=PL_VS_CAP, vs0_fpm=vz_pl0)
+        _,     vs_ca = vs_time_series(tgo, dt, cat_td_k, cat_ag_k, cat_vs, sense=sense_ca, cap_fpm=cat_cap, vs0_fpm=vz_cat0)
         # Intruder non-compliance: mutually exclusive, TA_ONLY precedence
         mode = "BASE"
         if ta_only:
@@ -588,6 +641,15 @@ if _has and _df is not None:
 # Independent hint (no trailing else)
 if not (_has and _df is not None):
     st.info("Run a batch to see results. Use the **form** above; results will persist while you explore.")
+
+
+
+
+
+
+
+
+
 
 
 
