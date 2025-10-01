@@ -23,7 +23,7 @@ DEFAULT_RESP_THRESH_FPM = 300.0
 ALIM_MARGIN_FT = 100.0
 Z_95 = 1.96
 # Performance-limited (PL) — FIXED
-PL_DELAY_S = 0.1
+PL_DELAY_S = 0.9
 PL_ACCEL_G = 0.10
 PL_VS_FPM  = 500
 PL_VS_CAP  = 500
@@ -584,6 +584,15 @@ if _has and _df is not None:
 # Independent hint (no trailing else)
 if not (_has and _df is not None):
     st.info("Run a batch to see results. Use the **form** above; results will persist while you explore.")
+
+
+
+
+
+
+
+
+
 
 
 
