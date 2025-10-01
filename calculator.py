@@ -122,11 +122,50 @@ def sample_pilot_response_cat(rng):
         accel = max(0.05, rng.normal(0.10, 0.02))
     return float(delay), float(accel)
 # -----------------------------
+
+# --------------------------------------------------------------------
+# ICAO Flight Level sampling (eastbound odd, westbound even; RVSM 290/300)
+# --------------------------------------------------------------------
+def _build_fl_tables(min_fl=150, max_fl=300):
+    east_odds = []
+    west_evens = []
+    for fl in range(150, 290, 10):
+        if fl % 20 == 10:  # 150,170,...,270
+            east_odds.append(fl)
+        else:              # 160,180,...,280
+            west_evens.append(fl)
+    if 290 >= min_fl and 290 <= max_fl:
+        east_odds.append(290)
+    if 300 >= min_fl and 300 <= max_fl:
+        west_evens.append(300)
+    east_odds  = [fl for fl in east_odds  if min_fl <= fl <= max_fl]
+    west_evens = [fl for fl in west_evens if min_fl <= fl <= max_fl]
+    if not east_odds:
+        east_odds = [min_fl + (0 if (min_fl % 20 == 10) else 10)]
+    if not west_evens:
+        west_evens = [min_fl + (10 if (min_fl % 20 == 10) else 0)]
+    return east_odds, west_evens
+
+def sample_flight_level(track_deg: float, rng, min_fl: int = 150, max_fl: int = 300) -> int:
+    east_odds, west_evens = _build_fl_tables(min_fl=min_fl, max_fl=max_fl)
+    hdg = float(track_deg) % 360.0
+    if 0.0 <= hdg < 180.0:
+        return int(rng.choice(east_odds))
+    else:
+        return int(rng.choice(west_evens))
+
 # Altitudes & initial vertical miss
 # -----------------------------
-def sample_altitudes_and_h0(rng, h0_mean=250.0, h0_sd=100.0, h0_lo=100.0, h0_hi=500.0):
-    FL_pl  = int(rng.integers(150, 301))
-    FL_cat = int(rng.integers(150, 301))
+def sample_altitudes_and_h0(rng, h0_mean=250.0, h0_sd=100.0, h0_lo=100.0, h0_hi=500.0,
+                           hdg1=None, hdg2=None, min_fl=150, max_fl=300):
+    """Sample ICAO-consistent flight levels based on headings and draw initial |vertical miss| h0."""
+    if hdg1 is None or hdg2 is None:
+        # Fallback: snap random FLs to 1000-ft grid (kept for legacy single-run uses)
+        FL_pl  = int(10 * (rng.integers(min_fl, max_fl+1) // 10))
+        FL_cat = int(10 * (rng.integers(min_fl, max_fl+1) // 10))
+    else:
+        FL_pl  = sample_flight_level(hdg1, rng, min_fl=min_fl, max_fl=max_fl)
+        FL_cat = sample_flight_level(hdg2, rng, min_fl=min_fl, max_fl=max_fl)
     h0 = float(np.clip(rng.normal(h0_mean, h0_sd), h0_lo, h0_hi))
     return FL_pl, FL_cat, h0
 # -----------------------------
@@ -293,28 +332,66 @@ with st.expander("Initial vertical miss (at RA)"):
     h0_lo   = st.number_input("h0 min (ft)", value=100.0, step=25.0)
     h0_hi   = st.number_input("h0 max (ft)", value=500.0, step=25.0)
 # -----------------------------
-# Single-run spot check
-# -----------------------------
-st.markdown("### Single‑run spot check")
-spot_FL_pl  = st.number_input("Spot FL (PL)",  value=200, step=10, min_value=150, max_value=300)
-spot_FL_cat = st.number_input("Spot FL (CAT)", value=200, step=10, min_value=150, max_value=300)
-spot_h0     = st.number_input("Spot initial vertical miss h0 (ft)", value=250.0, step=25.0)
+
+# Single-run encounter (deterministic) with plot + "Calculate" button
+st.markdown("### Single‑run encounter (deterministic)")
+
+colA, colB, colC = st.columns([1,1,1])
+with colA:
+    spot_FL_pl  = st.number_input("Spot FL (PL)",  value=200, step=10, min_value=150, max_value=300)
+with colB:
+    spot_FL_cat = st.number_input("Spot FL (CAT)", value=200, step=10, min_value=150, max_value=300)
+with colC:
+    spot_h0     = st.number_input("Initial vertical miss h0 (ft)", value=250.0, step=25.0)
+
+colD, colE = st.columns(2)
+with colD:
+    spot_dt   = st.number_input("Time step, dt (s)", value=dt, step=0.05, format="%.2f")
+with colE:
+    spot_range_nm = st.number_input("Nominal range for t_go derivation (NM)", value=8.0, step=0.5)
+
+# Use a representative head-on geometry for the deterministic run (PL climb, CAT descend)
 PL_TAS_spot  = ias_to_tas(PL_IAS_KT, spot_FL_pl * 100.0)
 CAT_TAS_spot = (cat_tas_min + cat_tas_max) / 2.0
 v_clos_spot  = relative_closure_kt(PL_TAS_spot, 0.0, CAT_TAS_spot, 180.0)
-tgo_geom_spot= time_to_go_from_geometry(8.0, v_clos_spot) or 30.0
+tgo_geom_spot= time_to_go_from_geometry(spot_range_nm, v_clos_spot) or 30.0
 t_cpa_spot   = float(min(max(20.0, tgo_geom_spot), tgo_cap))
-dh_pl_ft = delta_h_piecewise(t_cpa_spot, PL_DELAY_S, PL_ACCEL_G, PL_VS_FPM)
-dh_cat_ft= delta_h_piecewise(t_cpa_spot, cat_td_nom, cat_ag_nom, cat_vs)
-dh_base  = baseline_dh_ft(t_cpa_spot, mode=baseline)
-ratio    = (dh_base / dh_pl_ft) if dh_pl_ft > 1e-6 else np.nan
-unres_rr = 1.1 * ratio
-spot_tab = pd.DataFrame({
-    "Aircraft": ["PL (ownship)", "CAT (intruder)", "Baseline"],
-    "Δh @ CPA (ft)": [dh_pl_ft, dh_cat_ft, dh_base]
-})
-st.dataframe(spot_tab, use_container_width=True)
-st.write(f"Scaled unresolved RR ≈ **{unres_rr:,.3f}%** (ratio {ratio:,.3f}); t_go≈**{t_cpa_spot:.1f}s**")
+
+if st.button("Calculate (single run)"):
+    # Build VS profiles (PL climbs, CAT descends) with current nominal CAT response and caps
+    times_spot, vs_pl_spot = vs_time_series(t_cpa_spot, spot_dt, PL_DELAY_S, PL_ACCEL_G, PL_VS_FPM, sense=+1, cap_fpm=PL_VS_CAP)
+    _,         vs_ca_spot = vs_time_series(t_cpa_spot, spot_dt, cat_td_nom,  cat_ag_nom,  cat_vs,    sense=-1, cap_fpm=cat_cap)
+    # Integrate to altitude (start PL at 0, CAT at +h0)
+    z_pl_spot = integrate_altitude_from_vs(times_spot, vs_pl_spot)              # ft
+    z_ca_spot = spot_h0 - integrate_altitude_from_vs(times_spot, vs_ca_spot)    # descending from +h0
+    # Miss at CPA
+    miss_cpa  = abs(z_ca_spot[-1] - z_pl_spot[-1])
+    # Δh by CPA
+    dh_pl_ft  = delta_h_piecewise(t_cpa_spot, PL_DELAY_S, PL_ACCEL_G, PL_VS_FPM)
+    dh_cat_ft = delta_h_piecewise(t_cpa_spot, cat_td_nom,  cat_ag_nom,  cat_vs)
+    dh_base   = baseline_dh_ft(t_cpa_spot, mode=baseline)
+    ratio     = (dh_base / dh_pl_ft) if dh_pl_ft > 1e-9 else np.inf
+    unres_rr  = 1.1 * ratio
+    alim_breach = bool(miss_cpa < alim)
+
+    # Plot altitude diagram
+    fig, ax = plt.subplots(figsize=(7,3.6))
+    ax.plot(times_spot, z_pl_spot, label="PL altitude (ft)")
+    ax.plot(times_spot, z_ca_spot, label="CAT altitude (ft)")
+    ax.axhline(0.0, linestyle="--", linewidth=1)
+    ax.set_xlabel("Time since RA trigger (s)")
+    ax.set_ylabel("Relative altitude (ft)")
+    ax.set_title("Single-run altitude profiles to CPA")
+    ax.legend(loc="best")
+    st.pyplot(fig)
+
+    # Report metrics
+    st.markdown(f"**Δh_PL** = {dh_pl_ft:,.0f} ft, **Δh_CAT** = {dh_cat_ft:,.0f} ft, **Δh_baseline** = {dh_base:,.0f} ft")
+    st.markdown(f"**RR (unresolved, scaled)** ≈ {unres_rr:,.3f}%  (ratio baseline/PL = {ratio:,.3f})")
+    st.markdown(f"**Miss @CPA** = {miss_cpa:,.0f} ft — **ALIM breach @CPA**: {'Yes' if alim_breach else 'No'} (ALIM = {alim:.0f} ft)")
+else:
+    st.info("Set inputs, then press **Calculate (single run)** to see the altitude diagram and metrics.")
+
 # -----------------------------
 # Batch Monte Carlo — FORM
 # -----------------------------
@@ -349,14 +426,14 @@ if submitted:
     rng = np.random.default_rng(int(seed))
     data = []
     for k in range(int(n_runs)):
-        FL_pl, FL_cat, h0 = sample_altitudes_and_h0(rng, h0_mean, h0_sd, h0_lo, h0_hi)
-        PL_TAS = ias_to_tas(PL_IAS_KT, FL_pl * 100.0)
-        CAT_TAS = float(rng.uniform(min(cat_tas_min, cat_tas_max), max(cat_tas_min, cat_tas_max)))
         if scenario == "Custom":
             h1 = rng.uniform(hdg1_min, hdg1_max)
             h2 = rng.uniform(hdg2_min, hdg2_max)
         else:
             h1, h2 = sample_headings(rng, scenario, hdg1_min, hdg1_max, rel_min, rel_max)
+        FL_pl, FL_cat, h0 = sample_altitudes_and_h0(rng, h0_mean, h0_sd, h0_lo, h0_hi, hdg1=h1, hdg2=h2)
+        PL_TAS = ias_to_tas(PL_IAS_KT, FL_pl * 100.0)
+        CAT_TAS = float(rng.uniform(min(cat_tas_min, cat_tas_max), max(cat_tas_min, cat_tas_max)))
         r0 = float(rng.uniform(min(r_min, r_max), max(r_min, r_max)))
         vcl = relative_closure_kt(PL_TAS, h1, CAT_TAS, h2)
         tgo_geom = time_to_go_from_geometry(r0, vcl)
