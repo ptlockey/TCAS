@@ -23,7 +23,7 @@ DEFAULT_RESP_THRESH_FPM = 300.0
 ALIM_MARGIN_FT = 100.0
 Z_95 = 1.96
 # Performance-limited (PL) — FIXED
-PL_DELAY_S = 0.9
+PL_DELAY_S = 0.1
 PL_ACCEL_G = 0.10
 PL_VS_FPM  = 500
 PL_VS_CAP  = 500
@@ -378,8 +378,11 @@ if submitted:
         ratio = (dh_base / dh_pl) if dh_pl > 1e-6 else np.nan
         unres_rr = 1.1 * ratio
         # VS time series (nominal commanded)
-        times, vs_pl = vs_time_series(tgo, dt, pl_td_k, pl_ag_k, PL_VS_FPM, sense=+1, cap_fpm=PL_VS_CAP)
-        _,     vs_ca = vs_time_series(tgo, dt, cat_td_k, cat_ag_k, cat_vs, sense=-1, cap_fpm=cat_cap)
+        cat_above = (FL_cat > FL_pl) if (FL_cat != FL_pl) else (rng.uniform() < 0.5)
+        sense_pl = -1 if cat_above else +1
+        sense_ca = +1 if cat_above else -1
+        times, vs_pl = vs_time_series(tgo, dt, pl_td_k, pl_ag_k, PL_VS_FPM, sense=sense_pl, cap_fpm=PL_VS_CAP)
+        _,     vs_ca = vs_time_series(tgo, dt, cat_td_k, cat_ag_k, cat_vs, sense=sense_ca, cap_fpm=cat_cap)
         # Intruder non-compliance: mutually exclusive, TA_ONLY precedence
         mode = "BASE"
         if ta_only:
@@ -416,7 +419,8 @@ if submitted:
         vs_pl_noisy, vs_ca_noisy = apply_surveillance_noise(rng, times, vs_pl, vs_ca, p_miss=p_miss)
         z_pl_dec = integrate_altitude_from_vs(times, vs_pl_noisy)
         z_ca_dec = integrate_altitude_from_vs(times, vs_ca_noisy)
-        sep_now_dec = h0 + (z_pl_dec - z_ca_dec)
+        s0 = h0 if cat_above else -h0
+        sep_now_dec = s0 + (z_ca_dec - z_pl_dec)
         evs, t_strengthen = surrogate_decision_stream(
             times, vs_pl_noisy, vs_ca_noisy, sep_now_dec,
             t_cpa_s=tgo, alim_ft=alim_ft, resp_thr=resp_thr
@@ -461,12 +465,12 @@ if submitted:
                 idx = np.argmax(ok)
                 return times[idx]
             return np.inf
-        t_own_ok = first_compliance_time(times, vs_pl, +1, thr=resp_thr)
-        t_int_ok = first_compliance_time(times, vs_ca, -1, thr=resp_thr)
+        t_own_ok = first_compliance_time(times, vs_pl, (+1 if sense_pl>0 else -1), thr=resp_thr)
+        t_int_ok = first_compliance_time(times, vs_ca, (+1 if sense_ca>0 else -1), thr=resp_thr)
         start_t  = max(t_own_ok, t_int_ok) + 0.5
         mask_any = (times >= start_t)
         min_pred_miss = float(np.min(pred_miss_series[mask_any])) if mask_any.any() else float(np.min(pred_miss_series))
-        miss_cpa   = float(np.abs(h0 + (z_pl[-1] - z_ca[-1])))
+        miss_cpa   = float(np.abs(s0 + (z_ca[-1] - z_pl[-1])))
         breach_cpa = (miss_cpa < alim_ft)
         breach_any = (min_pred_miss < alim_ft)  # "ANY (pred-CPA, both-responding)"
         data.append({
@@ -584,6 +588,15 @@ if _has and _df is not None:
 # Independent hint (no trailing else)
 if not (_has and _df is not None):
     st.info("Run a batch to see results. Use the **form** above; results will persist while you explore.")
+
+
+
+
+
+
+
+
+
 
 
 
