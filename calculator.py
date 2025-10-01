@@ -12,6 +12,16 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import streamlit as st
+
+# --- Helpers for h0 policy (cap by vertical separation minima) ---
+def _min_sep_ft_for_band(max_fl: int, policy: str = "FL290STEP") -> int:
+    """Return cap for h0 based on band policy.
+    FL290STEP: 1000 ft below FL290; 2000 ft at/above FL290.
+    RVSM: 1000 ft up to FL410; 2000 ft above FL410.
+    """
+    if policy.upper().startswith("RVSM"):
+        return 1000 if max_fl <= 410 else 2000
+    return 1000 if max_fl < 290 else 2000
 # -----------------------------
 # Constants & helpers
 # -----------------------------
@@ -124,10 +134,24 @@ def sample_pilot_response_cat(rng):
 # -----------------------------
 # Altitudes & initial vertical miss
 # -----------------------------
-def sample_altitudes_and_h0(rng, h0_mean=250.0, h0_sd=100.0, h0_lo=100.0, h0_hi=500.0):
-    FL_pl  = int(rng.integers(150, 301))
-    FL_cat = int(rng.integers(150, 301))
-    h0 = float(np.clip(rng.normal(h0_mean, h0_sd), h0_lo, h0_hi))
+def sample_altitudes_and_h0(rng, h0_mean=250.0, h0_sd=100.0, h0_lo=0.0, h0_hi=2000.0,
+                             policy: str = "FL290STEP"):
+    # First pick a base FL; then cap h0 by band; then set the other FL so |ΔFL| ≈ h0/100
+    FL_pl_base  = int(rng.integers(150, 301))
+    # Decide cap by band using base FL for now (we'll also clamp by bounds when we place the intruder)
+    cap = float(_min_sep_ft_for_band(FL_pl_base, policy=policy))
+    h0 = float(np.clip(rng.normal(h0_mean, h0_sd), max(h0_lo, 0.0), min(h0_hi, cap)))
+    # Convert h0 (ft) to FL units (100 ft per FL)
+    diff_FL = max(1, int(round(h0 / 100.0)))
+    # Randomly put CAT above or below
+    sign = 1 if rng.uniform() < 0.5 else -1
+    FL_cat_cand = FL_pl_base + sign * diff_FL
+    # Keep within bounds; if out, flip sign or clamp
+    if not (150 <= FL_cat_cand <= 300):
+        FL_cat_cand = FL_pl_base - sign * diff_FL
+        if not (150 <= FL_cat_cand <= 300):
+            FL_cat_cand = min(300, max(150, FL_pl_base + sign * diff_FL))
+    FL_pl, FL_cat = FL_pl_base, int(FL_cat_cand)
     return FL_pl, FL_cat, h0
 # -----------------------------
 # Surveillance/noise (for surrogate perception only)
@@ -306,8 +330,8 @@ with colC:
     spot_dt = st.number_input("Time step, dt (s)", value=dt, step=0.05, format="%.2f", min_value=0.01)
 
 if st.button("Calculate (single run)"):
-    times_spot, vs_pl_spot = vs_time_series(t_cpa_spot, spot_dt, PL_DELAY_S, PL_ACCEL_G, PL_VS_FPM, sense=+1, cap_fpm=PL_VS_CAP)
-    _,         vs_ca_spot = vs_time_series(t_cpa_spot, spot_dt, cat_td_nom,  cat_ag_nom,  cat_vs,    sense=-1, cap_fpm=cat_cap)
+    times_spot, vs_pl_spot = vs_time_series(t_cpa_spot, spot_dt, PL_DELAY_S, PL_ACCEL_G, PL_VS_FPM, sense=-1, cap_fpm=PL_VS_CAP)
+    _,         vs_ca_spot = vs_time_series(t_cpa_spot, spot_dt, cat_td_nom,  cat_ag_nom,  cat_vs,    sense=+1, cap_fpm=cat_cap)
 
     z_pl_spot = integrate_altitude_from_vs(times_spot, vs_pl_spot)              # climb from 0
     z_ca_spot = spot_h0 + integrate_altitude_from_vs(times_spot, vs_ca_spot)    # descend from +h0 (vs negative)
@@ -401,8 +425,8 @@ if submitted:
         ratio = (dh_base / dh_pl) if dh_pl > 1e-6 else np.nan
         unres_rr = 1.1 * ratio
         # VS time series (nominal commanded)
-        times, vs_pl = vs_time_series(tgo, dt, pl_td_k, pl_ag_k, PL_VS_FPM, sense=+1, cap_fpm=PL_VS_CAP)
-        _,     vs_ca = vs_time_series(tgo, dt, cat_td_k, cat_ag_k, cat_vs, sense=-1, cap_fpm=cat_cap)
+        times, vs_pl = vs_time_series(tgo, dt, pl_td_k, pl_ag_k, PL_VS_FPM, sense=-1, cap_fpm=PL_VS_CAP)
+        _,     vs_ca = vs_time_series(tgo, dt, cat_td_k, cat_ag_k, cat_vs, sense=+1, cap_fpm=cat_cap)
         # Intruder non-compliance: mutually exclusive, TA_ONLY precedence
         mode = "BASE"
         if ta_only:
@@ -489,7 +513,8 @@ if submitted:
         start_t  = max(t_own_ok, t_int_ok) + 0.5
         mask_any = (times >= start_t)
         min_pred_miss = float(np.min(pred_miss_series[mask_any])) if mask_any.any() else float(np.min(pred_miss_series))
-        miss_cpa   = float(np.abs(h0 + (z_pl[-1] - z_ca[-1])))
+        s0 = h0 if (FL_cat > FL_pl) else -h0
+        miss_cpa   = float(np.abs(s0 + (z_ca[-1] - z_pl[-1])))
         breach_cpa = (miss_cpa < alim_ft)
         breach_any = (min_pred_miss < alim_ft)  # "ANY (pred-CPA, both-responding)"
         data.append({
@@ -607,5 +632,8 @@ if _has and _df is not None:
 # Independent hint (no trailing else)
 if not (_has and _df is not None):
     st.info("Run a batch to see results. Use the **form** above; results will persist while you explore.")
+
+
+
 
 
