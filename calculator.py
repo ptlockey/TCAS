@@ -40,6 +40,12 @@ from simulation import (
     vs_time_series,
 )
 
+ALIM_CHOICES = [
+    ("FL50–FL100 (350 ft)", 350.0),
+    ("FL100–FL200 (400 ft)", 400.0),
+    ("FL200–FL420 (600 ft)", 600.0),
+]
+
 # ------------------------------- Streamlit UI -------------------------------
 
 st.set_page_config(page_title="ACAS/TCAS v7.1 Monte Carlo", layout="wide")
@@ -131,6 +137,22 @@ with st.sidebar:
             format="%.3f",
             help="Probability that the intruder responds in the commanded sense but with insufficient vertical speed."
         )
+
+
+    with st.expander("ALIM Settings", expanded=True):
+        alim_labels = [label for label, _ in ALIM_CHOICES]
+        alim_index_default = 1  # Default to FL100–FL200 band (400 ft)
+        alim_selection_label = st.radio(
+            "User-selected ALIM band",
+            options=alim_labels,
+            index=min(alim_index_default, len(alim_labels) - 1),
+            help=(
+                "Choose the TCAS v7.1 ALIM applied when scoring batch runs. "
+                "All runs in a batch will use the selected threshold."
+            ),
+        )
+        selected_alim_ft = dict(ALIM_CHOICES)[alim_selection_label]
+        st.caption(f"Using ±{selected_alim_ft:.0f} ft separation threshold for ALIM breaches.")
 
 
 tabs = st.tabs(["Single‑run demo", "Batch Monte Carlo"])
@@ -238,13 +260,15 @@ with tabs[1]:
             use_delay_mixture=True,
             dt=0.1,
             hdg1_min=float(hdg1_min), hdg1_max=float(hdg1_max),
-            hdg2_min=float(hdg2_min), hdg2_max=float(hdg2_max)
+            hdg2_min=float(hdg2_min), hdg2_max=float(hdg2_max),
+            alim_override_ft=float(selected_alim_ft),
         )
         st.session_state['df'] = df
 
     if 'df' in st.session_state and st.session_state['df'] is not None:
         df = st.session_state['df']
         st.success(f"Completed {len(df)} runs.")
+        st.caption(f"ALIM applied: {alim_selection_label} (±{selected_alim_ft:.0f} ft).")
         c1, c2, c3, c4, c5 = st.columns(5)
         p_rev = (df['eventtype'] == "REVERSE").mean()
         p_str = (df['eventtype'] == "STRENGTHEN").mean()
