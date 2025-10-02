@@ -385,7 +385,7 @@ def run_batch(runs: int = 5000, seed: int = 26, scenario: str = "Head-on",
         mode, sense_cat_exec, cat_delay_exec, cat_accel_exec, cat_vs_exec, cat_cap_exec = apply_non_compliance_to_cat(
             rng, sense_ca, base_delay_s=cat_delay_eff, base_accel_g=cat_accel_eff,
             vs_fpm=CAT_INIT_VS_FPM, cap_fpm=CAT_CAP_INIT_FPM,
-            p_opp=0.010, p_taonly=0.003, p_weak=0.300, jitter=True
+            p_opp=p_opp, p_taonly=p_ta, p_weak=p_weak, jitter=jitter_priors
         )
 
         # PL delay distribution
