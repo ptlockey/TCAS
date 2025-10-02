@@ -53,7 +53,7 @@ G = 9.80665              # m/s^2
 FT_PER_M = 3.28084
 MS_PER_FPM = 0.00508     # 1 fpm = 0.00508 m/s
 # Performance-limited (PL) aircraft defaults (more conservative than before)
-PL_DELAY_MEAN_S =servative than before)
+PL_DELAY_MEAN_S = 0.9 # (more servative than before)
 PL_DELAY_MEAN_S = 2.2    # s (moved from ~0.9 s to represent manual/limited performance)
 PL_DELAY_SD_S   = 0.4
 PL_ACCEL_G      = 0.10
