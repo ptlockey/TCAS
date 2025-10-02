@@ -126,15 +126,34 @@ def sample_headings(
 # ----------------------------- ALIM & Scoring -----------------------------
 
 
-def alim_ft_from_alt(pressure_alt_ft: float) -> float:
-    """Simplified ALIM: 300 ft @ ≤10kft → 700 ft @ ≥35kft (linear)."""
+# Nominal TCAS v7.1 ALIM schedule (ft) expressed as altitude bands.
+ALIM_BANDS_FT = (
+    (5000.0, 10000.0, 350.0),  # FL50–FL100
+    (10000.0, 20000.0, 400.0),  # FL100–FL200
+    (20000.0, 42000.0, 600.0),  # FL200–FL420
+)
 
-    a = max(0.0, min(35000.0, pressure_alt_ft))
-    if a <= 10000.0:
-        return 300.0
-    if a >= 35000.0:
-        return 700.0
-    return float(np.interp(a, [10000.0, 35000.0], [300.0, 700.0]))
+
+def alim_ft_from_alt(pressure_alt_ft: float, override_ft: Optional[float] = None) -> float:
+    """Return the ALIM associated with the provided altitude.
+
+    When ``override_ft`` is supplied the caller is requesting a user-selected
+    ALIM value (e.g. via the UI). Otherwise the value is determined from the
+    discrete TCAS v7.1 altitude bands.
+    """
+
+    if override_ft is not None:
+        return float(override_ft)
+
+    if pressure_alt_ft < ALIM_BANDS_FT[0][0]:
+        return float(ALIM_BANDS_FT[0][2])
+
+    for lower, upper, alim in ALIM_BANDS_FT:
+        if lower <= pressure_alt_ft < upper:
+            return float(alim)
+
+    # At or above the top band we keep the highest ALIM value.
+    return float(ALIM_BANDS_FT[-1][2])
 
 
 def first_move_time(times: np.ndarray, vs: np.ndarray, tol_fpm: float = 50.0) -> float:
@@ -501,6 +520,7 @@ def run_batch(
     hdg1_max: float = 360.0,
     hdg2_min: float = 0.0,
     hdg2_max: float = 360.0,
+    alim_override_ft: Optional[float] = None,
 ) -> pd.DataFrame:
     rng = np.random.default_rng(int(seed))
     data: List[Dict] = []
@@ -621,8 +641,8 @@ def run_batch(
         z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
         z_ca = integrate_altitude_from_vs(times, vs_ca, h0 if cat_above else -h0)
 
-        # ALIM (altitude-dependent) at PL altitude
-        alim_ft = alim_ft_from_alt(FL_PL * 100.0)
+        # ALIM (altitude-dependent) at PL altitude or user override
+        alim_ft = alim_ft_from_alt(FL_PL * 100.0, override_ft=alim_override_ft)
 
         # Classify first-phase outcome
         eventtype, minsep_ft, sep_cpa_ft, t_check = classify_event(
@@ -736,6 +756,7 @@ __all__ = [
     "TGO_MIN_S",
     "TGO_MAX_S",
     "ALIM_MARGIN_FT",
+    "ALIM_BANDS_FT",
     # helpers
     "ias_to_tas",
     "vs_time_series",
