@@ -261,50 +261,134 @@ with tabs[1]:
         st.markdown("### Preview")
         st.dataframe(df.head(200), use_container_width=True)
 
-        st.markdown("### Plot a specific run")
-        rid = st.number_input(
-            "Run id",
-            min_value=int(df['run'].min()),
-            max_value=int(df['run'].max()),
-            value=int(df['run'].min()),
-            help="Select a run to inspect the time history corresponding to that Monte Carlo sample."
+        st.markdown("### Batch insights")
+
+        event_order = ["NONE", "STRENGTHEN", "REVERSE"]
+        color_map = {"NONE": "#6baed6", "STRENGTHEN": "#fd8d3c", "REVERSE": "#d7301f"}
+
+        counts = df['eventtype'].value_counts().reindex(event_order, fill_value=0)
+        shares = counts / len(df)
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5), constrained_layout=True)
+
+        axes[0].bar(event_order, counts[event_order], color=[color_map[e] for e in event_order])
+        for idx, evt in enumerate(event_order):
+            axes[0].text(
+                idx,
+                counts[evt] + 0.01 * len(df),
+                f"{100 * shares.get(evt, 0.0):.1f}%",
+                ha='center',
+                va='bottom',
+                fontsize=10,
+            )
+        axes[0].set_ylabel("Runs")
+        axes[0].set_title("Resolution advisory outcomes")
+        axes[0].grid(axis='y', alpha=0.2)
+
+        grouped_h0 = [df.loc[df['eventtype'] == evt, 'h0ft'].dropna() for evt in event_order]
+        axes[1].boxplot(
+            grouped_h0,
+            labels=["None", "Strengthen", "Reverse"],
+            patch_artist=True,
+            boxprops=dict(facecolor="#f0f0f0"),
         )
-        row = df[df['run'] == rid].iloc[0]
+        axes[1].set_ylabel("Initial vertical separation h₀ (ft)")
+        axes[1].set_title("Initial geometry by RA outcome")
+        axes[1].grid(alpha=0.2)
 
-        # Rebuild kinematics from stored fields (display only; uses assumed initial VS = 0)
-        tgo = float(row["tgos"])
-        h0 = float(row["h0ft"])
-        FL_pl = int(row["FL_PL"])
-        FL_cat = int(row["FL_CAT"])
-        cat_above = (FL_cat > FL_pl) if (FL_cat != FL_pl) else True
-        sense_pl = int(row["sensePL"])
-        sense_cat = int(row["senseCAT_exec"])
-        cat_td = float(row["catDelay"])
-        cat_ag = float(row["catAccel_g"])
-        cat_vs = float(row["catVS_cmd"])
-        cat_cap = float(row["catCap_cmd"])
-        pl_delay = float(row["plDelay"])
-        alim_ft = float(row['ALIM_ft'])
-
-        times, vs_pl = vs_time_series(tgo, 0.1, pl_delay, PL_ACCEL_G, PL_VS_FPM, sense=sense_pl, cap_fpm=PL_VS_CAP_FPM, vs0_fpm=0.0)
-        _, vs_ca = vs_time_series(tgo, 0.1, cat_td, cat_ag, cat_vs, sense=sense_cat, cap_fpm=cat_cap, vs0_fpm=0.0)
-        z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
-        z_ca = integrate_altitude_from_vs(times, vs_ca, h0 if cat_above else -h0)
-        miss_cpa = float(abs(z_ca[-1] - z_pl[-1]))
-
-        fig, ax = plt.subplots(figsize=(8,4))
-        ax.plot(times, z_pl, label=f"PL ({'climb' if sense_pl>0 else 'descend'})")
-        ax.plot(times, z_ca, label=f"CAT ({'climb' if sense_cat>0 else 'descend'}) [{row['CAT_mode']}]")
-        ax.fill_between(times, z_pl - alim_ft, z_pl + alim_ft, alpha=0.08, label=f"±ALIM at FL{FL_pl}")
-        ax.axhline(0, ls='--', lw=1, alpha=0.6)
-        if not pd.isna(row['t_second_issue']):
-            ax.axvline(float(row['t_second_issue']), ls=':', lw=1, alpha=0.7, label='2nd‑phase issue')
-        ax.set_xlabel("Time since RA trigger (s)")
-        ax.set_ylabel("Relative altitude (ft)")
-        ax.set_title(f"Run {int(row['run'])} — {row['eventtype']} — Δh@CPA={miss_cpa:.0f} ft")
-        ax.legend(); ax.grid(True, alpha=0.3)
         st.pyplot(fig)
-        st.caption("Shaded band visualises ±ALIM around the protected aircraft during the sampled run.")
+        st.caption(
+            "Left: outcome mix across the batch. Right: how initial vertical separation trends with reversal/strengthen events."
+        )
+
+        margin = df['sep_cpa_ft'] - df['ALIM_ft']
+        breach_mask = margin < 0.0
+        fig2, ax2 = plt.subplots(figsize=(8, 5))
+
+        for evt in event_order:
+            mask_evt = df['eventtype'] == evt
+            if not mask_evt.any():
+                continue
+            ax2.scatter(
+                df.loc[mask_evt, 'tgos'],
+                margin[mask_evt],
+                alpha=0.45,
+                s=30,
+                label=f"{evt.title()} runs" if evt == "NONE" else evt.title(),
+                color=color_map[evt],
+            )
+
+        if breach_mask.any():
+            ax2.scatter(
+                df.loc[breach_mask, 'tgos'],
+                margin[breach_mask],
+                facecolors='none',
+                edgecolors='#000000',
+                s=60,
+                linewidths=0.8,
+                label='ALIM breach @ CPA',
+            )
+
+        ax2.axhline(0.0, color='k', linestyle='--', linewidth=1, alpha=0.7)
+        ax2.set_xlabel("Time to go at RA issue (s)")
+        ax2.set_ylabel("CPA separation − ALIM (ft)")
+        ax2.set_title("CPA margin relative to ALIM")
+        ax2.grid(alpha=0.25)
+        ax2.legend(loc='best')
+
+        st.pyplot(fig2)
+
+        breach_rate = 100.0 * breach_mask.mean()
+        st.caption(
+            "Points below the dashed line represent CPA separations that fail to clear ALIM. "
+            f"{breach_rate:.2f}% of sampled runs breached ALIM at CPA; highlighted markers show where they occur."
+        )
+
+        with st.expander("Inspect an individual run", expanded=False):
+            rid = st.number_input(
+                "Run id",
+                min_value=int(df['run'].min()),
+                max_value=int(df['run'].max()),
+                value=int(df['run'].min()),
+                help="Select a run to inspect the time history corresponding to that Monte Carlo sample.",
+            )
+            row = df[df['run'] == rid].iloc[0]
+
+            # Rebuild kinematics from stored fields (display only; uses assumed initial VS = 0)
+            tgo = float(row["tgos"])
+            h0 = float(row["h0ft"])
+            FL_pl = int(row["FL_PL"])
+            FL_cat = int(row["FL_CAT"])
+            cat_above = (FL_cat > FL_pl) if (FL_cat != FL_pl) else True
+            sense_pl = int(row["sensePL"])
+            sense_cat = int(row["senseCAT_exec"])
+            cat_td = float(row["catDelay"])
+            cat_ag = float(row["catAccel_g"])
+            cat_vs = float(row["catVS_cmd"])
+            cat_cap = float(row["catCap_cmd"])
+            pl_delay = float(row["plDelay"])
+            alim_ft = float(row['ALIM_ft'])
+
+            times, vs_pl = vs_time_series(tgo, 0.1, pl_delay, PL_ACCEL_G, PL_VS_FPM, sense=sense_pl, cap_fpm=PL_VS_CAP_FPM, vs0_fpm=0.0)
+            _, vs_ca = vs_time_series(tgo, 0.1, cat_td, cat_ag, cat_vs, sense=sense_cat, cap_fpm=cat_cap, vs0_fpm=0.0)
+            z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
+            z_ca = integrate_altitude_from_vs(times, vs_ca, h0 if cat_above else -h0)
+            miss_cpa = float(abs(z_ca[-1] - z_pl[-1]))
+
+            fig_run, ax_run = plt.subplots(figsize=(8,4))
+            ax_run.plot(times, z_pl, label=f"PL ({'climb' if sense_pl>0 else 'descend'})")
+            ax_run.plot(times, z_ca, label=f"CAT ({'climb' if sense_cat>0 else 'descend'}) [{row['CAT_mode']}]")
+            ax_run.fill_between(times, z_pl - alim_ft, z_pl + alim_ft, alpha=0.08, label=f"±ALIM at FL{FL_pl}")
+            ax_run.axhline(0, ls='--', lw=1, alpha=0.6)
+            if not pd.isna(row['t_second_issue']):
+                ax_run.axvline(float(row['t_second_issue']), ls=':', lw=1, alpha=0.7, label='2nd‑phase issue')
+            ax_run.set_xlabel("Time since RA trigger (s)")
+            ax_run.set_ylabel("Relative altitude (ft)")
+            ax_run.set_title(f"Run {int(row['run'])} — {row['eventtype']} — Δh@CPA={miss_cpa:.0f} ft")
+            ax_run.legend(); ax_run.grid(True, alpha=0.3)
+            st.pyplot(fig_run)
+            st.caption("Shaded band visualises ±ALIM around the protected aircraft during the sampled run.")
+
 
         # Download
         buf = io.BytesIO()
