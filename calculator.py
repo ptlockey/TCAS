@@ -528,7 +528,7 @@ if "df" in st.session_state:
     ax2.grid(True, alpha=0.3); ax2.legend()
     st.pyplot(fig2)
     st.subheader("Download batch data")
-    st.download_button("Download CSV", data=df.to_csv(index=False).encode("utf-8"),
+    st.download_button="Download CSV", data=df.to_csv(index=False).encode("utf-8"),
  
 
 
