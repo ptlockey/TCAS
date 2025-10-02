@@ -130,7 +130,7 @@ def compliance_score_method_b_like(sense_required: int, vs_trace: np.ndarray, ti
                                    required_vs: float = CAT_INIT_VS_FPM) -> str:
     """Proxy for Method‑B: look ~3 s after first movement and label Following/Weak/No/Opposite/Excessive."""
     t_move = first_move_time(times, vs_trace)
-    t_eval = t_move + 3.0
+    t_eval = t_move + 3.5
     idx = np.searchsorted(times, t_eval, side='left')
     if idx >= len(times):
         idx = -1
