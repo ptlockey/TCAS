@@ -63,7 +63,7 @@ PL_VS_FPM       = 500.0  # fpm target for PL
 PL_VS_CAP_FPM   = 500.0  # cap for PL
 # CAT (transport) nominal corrective behaviors (v7.1 assumptions)
 CAT_INIT_VS_FPM      = 1500.0    # initial corrective RA target
-CAT_STRENG initial corrective RA target
+CAT_STRENG initial = 2000.0 (#corrective RA target
 CAT_STRENGTH_FPM     = 2500.0    # strengthened RA target (Increase Climb/Descent)
 CAT_CAP_INIT_FPM     = 2000.0    # initial cap
 CAT_CAP_STRENGTH_FPM = 3000.0    # strengthened cap
