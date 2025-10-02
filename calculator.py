@@ -486,99 +486,85 @@ with st.sidebar:
 
 # Single‑run panel
 st.subheader("Single‑run demo")
-c1,c2,c3 = st.columns(3)
+
+SINGLE_FL = 220
+single_alt_ft = SINGLE_FL * 100.0
+pl_tas = ias_to_tas(PL_IAS_KT, single_alt_ft)
+
+c1, c2, c3 = st.columns(3)
 with c1:
-    spot_h0 = st.number_input("Initial vertical miss h0 (ft)", value=250.0, step=25.0, min_value=0.0)
+    initial_range_nm = st.number_input("Initial range (NM)", value=6.0, min_value=1.0, step=0.5)
 with c2:
-    spot_tgo = st.slider("t_go to CPA (s)", min_value=15.0, max_value=35.0, value=25.0, step=0.5)
-with c3:
     dt = st.number_input("Time step dt (s)", value=0.1, step=0.05, min_value=0.01, format="%.2f")
+with c3:
+    cat_sense_label = st.selectbox("CAT response", ["Descend", "Level", "Climb"], index=0)
+
+cat_delay_user = st.number_input("CAT pilot delay (s)", value=5.0, min_value=0.0, step=0.5, format="%.1f")
+cat_accel_user = st.number_input("CAT acceleration (g)", value=0.25, min_value=0.01, step=0.01, format="%.2f")
+cat_vs_user = st.number_input("CAT vertical speed target (fpm)", value=1500.0, min_value=0.0, step=100.0)
+cat_ias_user = st.number_input("CAT IAS (kt)", value=250.0, min_value=50.0, step=10.0)
 
 if st.button("Run single case"):
-    rng = np.random.default_rng(12345)
-    # Altitudes
-    FL_PL, FL_CAT, h0 = sample_altitudes_and_h0(rng, h0_mean=spot_h0, h0_sd=1e-6, h0_lo=max(0.0, spot_h0-1.0), h0_hi=spot_h0+1.0)
-    cat_above = (FL_CAT > FL_PL) if (FL_CAT != FL_PL) else True
+    cat_tas = ias_to_tas(float(cat_ias_user), single_alt_ft)
+    closure_kt = pl_tas + cat_tas
 
-    # Initial VS
-    vz_pl0  = sample_initial_vs_with_aggressiveness(rng, aggressiveness, aggressiveness<=1e-6)
-    vz_cat0 = sample_initial_vs_with_aggressiveness(rng, aggressiveness, aggressiveness<=1e-6)
+    t_cpa = time_to_go_from_geometry(float(initial_range_nm), closure_kt)
 
-    # Optimal sense
-    (sense_pl, sense_ca), miss_nominal, miss_alt = choose_optimal_sense(
-        spot_tgo, dt, spot_h0, cat_above, vz_pl0, vz_cat0,
-        cat_delay_nom=5.0, cat_accel_nom=0.25, cat_vs=CAT_INIT_VS_FPM, cat_cap=CAT_CAP_INIT_FPM
-    )
-
-    # CAT delay mixture + AP/FD
-    if np.random.uniform() < 0.7:
-        cat_delay_eff = float(max(0.0, np.random.normal(4.5, 1.0)))
-        cat_accel_eff = float(max(0.05, np.random.normal(0.25, 0.03)))
+    if t_cpa is None:
+        st.warning("Closure rate is zero or negative; CPA cannot be determined.")
     else:
-        cat_delay_eff = float(max(0.0, np.random.normal(8.5, 1.5)))
-        cat_accel_eff = float(max(0.05, np.random.normal(0.10, 0.02)))
-    if np.random.uniform() < apfd_share:
-        cat_delay_eff = max(0.0, cat_delay_eff - 0.8)
-        cat_accel_eff = max(0.05, cat_accel_eff + 0.03)
+        sense_pl = +1  # PL always climbs
+        if cat_sense_label == "Climb":
+            sense_cat = +1
+        elif cat_sense_label == "Descend":
+            sense_cat = -1
+        else:
+            sense_cat = 0
 
-    # Non‑compliance
-    mode, sense_cat_exec, cat_delay_exec, cat_accel_exec, cat_vs_exec, cat_cap_exec = apply_non_compliance_to_cat(
-        rng, sense_ca, base_delay_s=cat_delay_eff, base_accel_g=cat_accel_eff,
-        vs_fpm=CAT_INIT_VS_FPM, cap_fpm=CAT_CAP_INIT_FPM,
-        p_opp=p_opp, p_taonly=p_ta, p_weak=p_weak, jitter=jitter
-    )
+        times, vs_pl = vs_time_series(t_cpa, float(dt), 0.9, PL_ACCEL_G, PL_VS_FPM,
+                                      sense=sense_pl, cap_fpm=PL_VS_CAP_FPM, vs0_fpm=0.0)
 
-    # PL delay
-    pl_delay = max(0.0, np.random.normal(PL_DELAY_MEAN_S, PL_DELAY_SD_S))
+        if sense_cat == 0 or cat_vs_user <= 1e-6:
+            times_cat = np.arange(0.0, t_cpa + 1e-9, float(dt))
+            vs_cat = np.zeros_like(times_cat)
+        else:
+            _, vs_cat = vs_time_series(t_cpa, float(dt), float(cat_delay_user), float(cat_accel_user),
+                                       float(cat_vs_user), sense=sense_cat, cap_fpm=float(cat_vs_user),
+                                       vs0_fpm=0.0)
+            times_cat = times
 
-    # First phase
-    times, vs_pl = vs_time_series(spot_tgo, dt, pl_delay, PL_ACCEL_G, PL_VS_FPM, sense=sense_pl,
-                                  cap_fpm=PL_VS_CAP_FPM, vs0_fpm=vz_pl0)
-    _, vs_ca = vs_time_series(spot_tgo, dt, cat_delay_exec, cat_accel_exec, cat_vs_exec, sense=sense_cat_exec,
-                              cap_fpm=cat_cap_exec, vs0_fpm=vz_cat0)
-    z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
-    z_ca = integrate_altitude_from_vs(times, vs_ca, spot_h0 if cat_above else -spot_h0)
+        z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
+        z_cat = integrate_altitude_from_vs(times_cat, vs_cat, 0.0)
 
-    # Classify
-    alim_ft = alim_ft_from_alt(FL_PL*100.0)
-    eventtype, minsep_ft, sep_cpa_ft, t_check = classify_event(
-        times, z_pl, z_ca, vs_pl, vs_ca, spot_tgo,
-        alim_ft=alim_ft, margin_ft=ALIM_MARGIN_FT,
-        sense_chosen_cat=sense_ca, sense_exec_cat=sense_cat_exec
-    )
+        # ensure equal length for plotting when CAT is level
+        if len(times_cat) != len(times):
+            vs_cat = np.zeros_like(times)
+            z_cat = np.zeros_like(times)
 
-    # Second phase if needed
-    t2_issue = None
-    if eventtype in ("STRENGTHEN","REVERSE"):
-        times2, vs_pl2, vs_ca2, t2_issue = apply_second_phase(
-            times, vs_pl, vs_ca, spot_tgo, dt,
-            eventtype, sense_pl, sense_cat_exec,
-            pl_vs0=vz_pl0, cat_vs0=vz_cat0,
-            pl_delay=pl_delay, pl_accel_g=PL_ACCEL_G, pl_cap=PL_VS_CAP_FPM,
-            cat_delay=1.0, cat_accel_g=0.20,
-            cat_vs_strength=CAT_STRENGTH_FPM, cat_cap=CAT_CAP_STRENGTH_FPM,
-            decision_latency_s=float(np.clip(np.random.normal(1.0,0.2),0.6,1.4))
+        delta_h_cpa = float(z_pl[-1] - z_cat[-1])
+        miss_cpa = abs(delta_h_cpa)
+
+        st.markdown(
+            f"**Scenario**: Head-on at FL{SINGLE_FL}, PL IAS {PL_IAS_KT:.0f} kt (TAS {pl_tas:.1f} kt), "
+            f"CAT IAS {cat_ias_user:.0f} kt (TAS {cat_tas:.1f} kt)."
         )
-        if t2_issue is not None:
-            z_pl2 = integrate_altitude_from_vs(times2, vs_pl2, 0.0)
-            z_ca2 = integrate_altitude_from_vs(times2, vs_ca2, spot_h0 if cat_above else -spot_h0)
-            times, vs_pl, vs_ca, z_pl, z_ca = times2, vs_pl2, vs_ca2, z_pl2, z_ca2
 
-    miss_cpa  = float(abs(z_ca[-1] - z_pl[-1]))
+        c_metric1, c_metric2, c_metric3 = st.columns(3)
+        c_metric1.metric("Time to CPA", f"{t_cpa:.1f} s")
+        c_metric2.metric("Range rate", f"{closure_kt:.1f} kt")
+        c_metric3.metric("Δh at CPA", f"{delta_h_cpa:.0f} ft")
 
-    # Plot
-    fig, ax = plt.subplots(figsize=(8,4))
-    ax.plot(times, z_pl, label=f"PL ({'climb' if sense_pl>0 else 'descend'})")
-    ax.plot(times, z_ca, label=f"CAT ({'climb' if sense_cat_exec>0 else 'descend'}) [{mode}]")
-    ax.fill_between(times, z_pl - alim_ft, z_pl + alim_ft, alpha=0.08, label=f"±ALIM at FL{FL_PL}")
-    ax.axhline(0, ls='--', lw=1, alpha=0.6)
-    if t2_issue is not None:
-        ax.axvline(t2_issue, ls=':', lw=1, alpha=0.7, label='2nd‑phase issue')
-    ax.set_xlabel("Time since RA trigger (s)")
-    ax.set_ylabel("Relative altitude (ft)")
-    ax.set_title(f"Single run — {eventtype} — Δh@CPA = {miss_cpa:.0f} ft")
-    ax.legend(); ax.grid(True, alpha=0.3)
-    st.pyplot(fig)
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.plot(times, z_pl, label="PL (climb)")
+        label_cat = "CAT (level)" if sense_cat == 0 else f"CAT ({'climb' if sense_cat>0 else 'descend'})"
+        ax.plot(times, z_cat, label=label_cat)
+        ax.axhline(0.0, ls='--', lw=1, alpha=0.6)
+        ax.set_xlabel("Time since RA trigger (s)")
+        ax.set_ylabel("Altitude change (ft)")
+        ax.set_title(f"Single run — Δh@CPA = {miss_cpa:.0f} ft")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        st.pyplot(fig)
 
 # Batch Monte Carlo
 st.subheader("Batch Monte Carlo")
