@@ -261,6 +261,7 @@ def apply_second_phase(times: np.ndarray, vs_pl: np.ndarray, vs_ca: np.ndarray,
                        tgo: float, dt: float, eventtype: str,
                        sense_pl: int, sense_cat_exec: int,
                        pl_vs0: float, cat_vs0: float,
+                       t_classify: float,
                        pl_delay: float = PL_DELAY_MEAN_S, pl_accel_g: float = PL_ACCEL_G, pl_cap: float = PL_VS_CAP_FPM,
                        cat_delay: float = 1.0, cat_accel_g: float = 0.20,
                        cat_vs_strength: float = CAT_STRENGTH_FPM, cat_cap: float = CAT_CAP_STRENGTH_FPM,
@@ -269,27 +270,39 @@ def apply_second_phase(times: np.ndarray, vs_pl: np.ndarray, vs_ca: np.ndarray,
     if eventtype not in ("STRENGTHEN", "REVERSE"):
         return times, vs_pl, vs_ca, None
 
-    # Issue time slightly after decision
-    t2_issue = float(times[-1] - max(0.0, tgo - times[-1]))
-    t2_issue += float(np.clip(decision_latency_s, 0.6, 1.4))
+    latency = float(np.clip(decision_latency_s, 0.6, 1.4))
+    t2_issue = float(max(0.0, min(tgo, t_classify + latency)))
     t_rem = max(0.0, tgo - t2_issue)
     if t_rem <= dt:
         return times, vs_pl, vs_ca, t2_issue
 
-    vs_pl_now = float(vs_pl[-1])
-    vs_ca_now = float(vs_ca[-1])
+    vs_pl_now = float(np.interp(t2_issue, times, vs_pl))
+    vs_ca_now = float(np.interp(t2_issue, times, vs_ca))
 
     new_sense_pl  = sense_pl if eventtype == "STRENGTHEN" else -sense_pl
     new_sense_cat = sense_cat_exec if eventtype == "STRENGTHEN" else -sense_cat_exec
 
-    t2, vs_pl2 = vs_time_series(t_rem, dt, pl_delay, pl_accel_g, pl_cap, sense=new_sense_pl,
-                                cap_fpm=pl_cap, vs0_fpm=vs_pl_now)
-    _,  vs_ca2 = vs_time_series(t_rem, dt, cat_delay, cat_accel_g, cat_vs_strength, sense=new_sense_cat,
-                                cap_fpm=cat_cap, vs0_fpm=vs_ca_now)
+    t2_rel, vs_pl_cont = vs_time_series(t_rem, dt, pl_delay, pl_accel_g, pl_cap,
+                                        sense=new_sense_pl, cap_fpm=pl_cap, vs0_fpm=vs_pl_now)
+    _,      vs_ca_cont = vs_time_series(t_rem, dt, cat_delay, cat_accel_g, cat_vs_strength,
+                                        sense=new_sense_cat, cap_fpm=cat_cap, vs0_fpm=vs_ca_now)
 
-    times2 = np.concatenate([times, t2_issue + t2[1:]])
-    vs_pl2 = np.concatenate([vs_pl, vs_pl2[1:]])
-    vs_ca2 = np.concatenate([vs_ca, vs_ca2[1:]])
+    prefix_mask = times < (t2_issue - 1e-9)
+    times_prefix = times[prefix_mask]
+    vs_pl_prefix = vs_pl[prefix_mask]
+    vs_ca_prefix = vs_ca[prefix_mask]
+
+    times_prefix = np.append(times_prefix, t2_issue)
+    vs_pl_prefix = np.append(vs_pl_prefix, vs_pl_now)
+    vs_ca_prefix = np.append(vs_ca_prefix, vs_ca_now)
+
+    times_suffix = t2_issue + t2_rel[1:]
+    vs_pl_suffix = vs_pl_cont[1:]
+    vs_ca_suffix = vs_ca_cont[1:]
+
+    times2 = np.concatenate([times_prefix, times_suffix])
+    vs_pl2 = np.concatenate([vs_pl_prefix, vs_pl_suffix])
+    vs_ca2 = np.concatenate([vs_ca_prefix, vs_ca_suffix])
     return times2, vs_pl2, vs_ca2, t2_issue
 
 # ------------------------------- Batch Runner -------------------------------
@@ -415,7 +428,7 @@ def run_batch(runs: int = 5000, seed: int = 26, scenario: str = "Head-on",
             times2, vs_pl2, vs_ca2, t2_issue = apply_second_phase(
                 times, vs_pl, vs_ca, tgo, dt,
                 eventtype, sense_pl, sense_cat_exec,
-                pl_vs0=vz0_pl, cat_vs0=vz0_cat,
+                pl_vs0=vz0_pl, cat_vs0=vz0_cat, t_classify=t_check,
                 pl_delay=pl_delay, pl_accel_g=PL_ACCEL_G, pl_cap=PL_VS_CAP_FPM,
                 cat_delay=1.0, cat_accel_g=0.20,
                 cat_vs_strength=CAT_STRENGTH_FPM, cat_cap=CAT_CAP_STRENGTH_FPM,
