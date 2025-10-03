@@ -694,6 +694,7 @@ def apply_second_phase(
     eventtype: str,
     sense_pl: int,
     sense_cat_exec: int,
+    sense_cat_cmd: int,
     pl_vs0: float,
     cat_vs0: float,
     t_classify: float,
@@ -707,23 +708,49 @@ def apply_second_phase(
     decision_latency_s: float = 1.0,
     cat_mode: str = "compliant",
     force_exigent: bool = False,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[float]]:
-    """Execute STRENGTHEN/REVERSE and continue the kinematics until CPA."""
+) -> Tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    Optional[float],
+    int,
+    int,
+    int,
+]:
+    """Execute STRENGTHEN/REVERSE and continue the kinematics until CPA.
+
+    The function returns the updated kinematic time series together with the
+    post-manoeuvre senses for the performance-limited ownship, the executed
+    intruder response, and the commanded intruder sense.
+    """
 
     if eventtype not in ("STRENGTHEN", "REVERSE"):
-        return times, vs_pl, vs_ca, None
+        return times, vs_pl, vs_ca, None, sense_pl, sense_cat_exec, sense_cat_cmd
 
     latency = float(np.clip(decision_latency_s, 0.6, 1.4))
     t2_issue = float(max(0.0, min(tgo, t_classify + latency)))
     t_rem = max(0.0, tgo - t2_issue)
     if t_rem <= dt:
-        return times, vs_pl, vs_ca, t2_issue
+        return (
+            times,
+            vs_pl,
+            vs_ca,
+            t2_issue,
+            sense_pl,
+            sense_cat_exec,
+            sense_cat_cmd,
+        )
 
     vs_pl_now = float(np.interp(t2_issue, times, vs_pl))
     vs_ca_now = float(np.interp(t2_issue, times, vs_ca))
 
     new_sense_pl = sense_pl
-    new_sense_cat = sense_cat_exec if eventtype == "STRENGTHEN" else -sense_cat_exec
+    new_sense_cat_exec = sense_cat_exec
+    new_sense_cat_cmd = sense_cat_cmd
+    if eventtype == "REVERSE":
+        new_sense_pl = -sense_pl
+        new_sense_cat_exec = -sense_cat_exec
+        new_sense_cat_cmd = -sense_cat_cmd
 
     mode_key = (cat_mode or "").lower().strip()
     canonical_mode = mode_key.replace(" ", "").replace("/", "")
@@ -754,27 +781,23 @@ def apply_second_phase(
         cat_vs_eff = cat_vs_strength
         cat_cap_eff = cat_cap
 
-    if eventtype == "REVERSE":
-        t2_rel = np.arange(0.0, t_rem + 1e-9, dt)
-        vs_pl_cont = np.interp(t2_issue + t2_rel, times, vs_pl)
-    else:
-        t2_rel, vs_pl_cont = vs_time_series(
-            t_rem,
-            dt,
-            pl_delay,
-            pl_accel_g,
-            pl_cap,
-            sense=new_sense_pl,
-            cap_fpm=pl_cap,
-            vs0_fpm=vs_pl_now,
-        )
+    t2_rel, vs_pl_cont = vs_time_series(
+        t_rem,
+        dt,
+        pl_delay,
+        pl_accel_g,
+        pl_cap,
+        sense=new_sense_pl,
+        cap_fpm=pl_cap,
+        vs0_fpm=vs_pl_now,
+    )
     _, vs_ca_cont = vs_time_series(
         t_rem,
         dt,
         cat_delay,
         cat_accel_eff,
         cat_vs_eff,
-        sense=new_sense_cat,
+        sense=new_sense_cat_exec,
         cap_fpm=cat_cap_eff,
         vs0_fpm=vs_ca_now,
     )
@@ -795,7 +818,15 @@ def apply_second_phase(
     times2 = np.concatenate([times_prefix, times_suffix])
     vs_pl2 = np.concatenate([vs_pl_prefix, vs_pl_suffix])
     vs_ca2 = np.concatenate([vs_ca_prefix, vs_ca_suffix])
-    return times2, vs_pl2, vs_ca2, t2_issue
+    return (
+        times2,
+        vs_pl2,
+        vs_ca2,
+        t2_issue,
+        new_sense_pl,
+        new_sense_cat_exec,
+        new_sense_cat_cmd,
+    )
 
 
 # ------------------------------- Batch Runner -------------------------------
@@ -1127,7 +1158,15 @@ def run_batch(
 
             force_exigent = bool(event_detail == "EXIGENT_STRENGTHEN")
             second_phase_cat_delay = 0.9 if cat_is_apfd else 2.5
-            times2, vs_pl2, vs_ca2, t2_issue = apply_second_phase(
+            (
+                times2,
+                vs_pl2,
+                vs_ca2,
+                t2_issue,
+                new_sense_pl,
+                new_sense_cat_exec,
+                new_sense_cat_cmd,
+            ) = apply_second_phase(
                 current_times,
                 current_vs_pl,
                 current_vs_ca,
@@ -1136,6 +1175,7 @@ def run_batch(
                 eventtype,
                 current_sense_pl,
                 current_sense_cat_exec,
+                current_sense_chosen,
                 pl_vs0=vz0_pl,
                 cat_vs0=vz0_cat,
                 t_classify=t_detect,
@@ -1168,9 +1208,9 @@ def run_batch(
                 h0 if cat_above else -h0,
             )
 
-            if eventtype == "REVERSE":
-                current_sense_cat_exec = -current_sense_cat_exec
-                current_sense_chosen = -current_sense_chosen
+            current_sense_pl = new_sense_pl
+            current_sense_cat_exec = new_sense_cat_exec
+            current_sense_chosen = new_sense_cat_cmd
 
             eval_start_time = float(t2_issue)
 
