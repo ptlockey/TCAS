@@ -15,6 +15,7 @@ from simulation import (
     PL_DELAY_MEAN_S,
     PL_VS_CAP_FPM,
     PL_VS_FPM,
+    choose_optimal_sense,
     apply_second_phase,
     classify_event,
     integrate_altitude_from_vs,
@@ -496,3 +497,40 @@ def test_run_batch_same_sense_reversal_rate_with_hold():
 
     slow_rate = same_sense_slow.mean()
     assert slow_rate < 0.05
+
+
+def test_run_batch_apfd_sense_matches_fast_template():
+    runs = 120
+    dt = 0.1
+    df = run_batch(
+        runs=runs,
+        seed=902,
+        scenario="Head-on",
+        jitter_priors=False,
+        use_delay_mixture=False,
+        apfd_share=1.0,
+        dt=dt,
+    )
+
+    assert df["CAT_is_APFD"].eq(1).all()
+
+    cat_profile = (
+        {"label": "manual", "weight": 0.0},
+        {"label": "apfd", "delay": 0.9, "accel": 0.25, "weight": 1.0},
+    )
+
+    mismatches = 0
+    for row in df.itertuples():
+        (sense_pl, sense_cat), _, _ = choose_optimal_sense(
+            row.tgos,
+            dt,
+            row.h0ft,
+            bool(row.cat_above),
+            row.pl_vs0_init,
+            row.cat_vs0_init,
+            cat_profiles=cat_profile,
+        )
+        if sense_cat != row.senseCAT_chosen:
+            mismatches += 1
+
+    assert mismatches == 0, f"Unexpected sense mismatch count: {mismatches}"

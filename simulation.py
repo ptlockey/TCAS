@@ -325,43 +325,120 @@ def choose_optimal_sense(
     cat_accel_nom: float = 0.25,
     cat_vs: float = CAT_INIT_VS_FPM,
     cat_cap: float = CAT_CAP_INIT_FPM,
+    cat_profiles: Optional[Tuple[Dict[str, float], ...]] = None,
 ) -> Tuple[Tuple[int, int], float, float]:
-    miss_updown = simulate_miss_for_senses(
-        tgo,
-        dt,
-        h0,
-        cat_above,
-        +1,
-        -1,
-        PL_DELAY_MEAN_S,
-        PL_ACCEL_G,
-        PL_VS_FPM,
-        PL_VS_CAP_FPM,
-        pl_vs0,
-        cat_delay_nom,
-        cat_accel_nom,
-        cat_vs,
-        cat_cap,
-        cat_vs0,
-    )
-    miss_downup = simulate_miss_for_senses(
-        tgo,
-        dt,
-        h0,
-        cat_above,
-        -1,
-        +1,
-        PL_DELAY_MEAN_S,
-        PL_ACCEL_G,
-        PL_VS_FPM,
-        PL_VS_CAP_FPM,
-        pl_vs0,
-        cat_delay_nom,
-        cat_accel_nom,
-        cat_vs,
-        cat_cap,
-        cat_vs0,
-    )
+    """Return the sense pair that minimises the expected miss distance.
+
+    Parameters
+    ----------
+    tgo, dt, h0, cat_above, pl_vs0, cat_vs0
+        Geometry and kinematic context for the current encounter.
+    cat_delay_nom, cat_accel_nom, cat_vs, cat_cap
+        Legacy nominal CAT response characteristics used when
+        ``cat_profiles`` is not supplied.
+    cat_profiles
+        Optional sequence of intruder-response templates. Each template is a
+        mapping supporting the keys ``delay``, ``accel``, ``vs``, ``cap`` and
+        ``weight`` (all optional). When provided the function evaluates both
+        sense options for every template and combines the miss distances using
+        the supplied weights to represent the anticipated response profile.
+
+    Returns
+    -------
+    ((int, int), float, float)
+        The commanded sense pair (PL, CAT) together with the expected miss
+        distance for the preferred sense and for the alternative sense.
+    """
+
+    if cat_profiles is None:
+        cat_profiles_seq: Tuple[Dict[str, float], ...] = (
+            {
+                "delay": float(cat_delay_nom),
+                "accel": float(cat_accel_nom),
+                "vs": float(cat_vs),
+                "cap": float(cat_cap),
+                "weight": 1.0,
+            },
+        )
+    else:
+        cat_profiles_seq = tuple(cat_profiles)
+        if not cat_profiles_seq:
+            cat_profiles_seq = (
+                {
+                    "delay": float(cat_delay_nom),
+                    "accel": float(cat_accel_nom),
+                    "vs": float(cat_vs),
+                    "cap": float(cat_cap),
+                    "weight": 1.0,
+                },
+            )
+
+    weighted_scores = {(+1, -1): 0.0, (-1, +1): 0.0}
+    totals = {(+1, -1): 0.0, (-1, +1): 0.0}
+    unweighted_samples = {(+1, -1): [], (-1, +1): []}
+
+    for profile in cat_profiles_seq:
+        delay = float(profile.get("delay", cat_delay_nom))
+        accel = float(profile.get("accel", cat_accel_nom))
+        vs_cmd = float(profile.get("vs", cat_vs))
+        cap_cmd = float(profile.get("cap", cat_cap))
+        weight = max(0.0, float(profile.get("weight", 1.0)))
+
+        miss_updown = simulate_miss_for_senses(
+            tgo,
+            dt,
+            h0,
+            cat_above,
+            +1,
+            -1,
+            PL_DELAY_MEAN_S,
+            PL_ACCEL_G,
+            PL_VS_FPM,
+            PL_VS_CAP_FPM,
+            pl_vs0,
+            delay,
+            accel,
+            vs_cmd,
+            cap_cmd,
+            cat_vs0,
+        )
+        miss_downup = simulate_miss_for_senses(
+            tgo,
+            dt,
+            h0,
+            cat_above,
+            -1,
+            +1,
+            PL_DELAY_MEAN_S,
+            PL_ACCEL_G,
+            PL_VS_FPM,
+            PL_VS_CAP_FPM,
+            pl_vs0,
+            delay,
+            accel,
+            vs_cmd,
+            cap_cmd,
+            cat_vs0,
+        )
+
+        weighted_scores[(+1, -1)] += weight * miss_updown
+        weighted_scores[(-1, +1)] += weight * miss_downup
+        totals[(+1, -1)] += weight
+        totals[(-1, +1)] += weight
+        unweighted_samples[(+1, -1)].append(miss_updown)
+        unweighted_samples[(-1, +1)].append(miss_downup)
+
+    expected_scores = {}
+    for senses in weighted_scores:
+        total_weight = totals[senses]
+        if total_weight > 0.0:
+            expected_scores[senses] = weighted_scores[senses] / total_weight
+        else:
+            expected_scores[senses] = float(np.mean(unweighted_samples[senses]))
+
+    miss_updown = expected_scores[(+1, -1)]
+    miss_downup = expected_scores[(-1, +1)]
+
     if miss_updown > miss_downup:
         return (+1, -1), miss_updown, miss_downup
     else:
@@ -826,6 +903,35 @@ def run_batch(
         vz0_pl = sample_initial_vs_with_aggressiveness(rng, aggressiveness, leveloff_context)
         vz0_cat = sample_initial_vs_with_aggressiveness(rng, aggressiveness, leveloff_context)
 
+        cat_delay_eff = float(np.clip(rng.normal(5.0, 1.5), 2.5, 8.0))
+        if use_delay_mixture:
+            cat_accel_eff = float(np.clip(rng.normal(0.24, 0.02), 0.18, 0.28))
+        else:
+            cat_accel_eff = float(np.clip(rng.normal(0.25, 0.01), 0.22, 0.28))
+
+        manual_weight = max(0.0, 1.0 - apfd_share_effective)
+        cat_profiles = [
+            {
+                "label": "manual",
+                "delay": cat_delay_eff,
+                "accel": cat_accel_eff,
+                "vs": CAT_INIT_VS_FPM,
+                "cap": CAT_CAP_INIT_FPM,
+                "weight": manual_weight,
+            }
+        ]
+        if apfd_share_effective > 1e-6:
+            cat_profiles.append(
+                {
+                    "label": "apfd",
+                    "delay": 0.9,
+                    "accel": 0.25,
+                    "vs": CAT_INIT_VS_FPM,
+                    "cap": CAT_CAP_INIT_FPM,
+                    "weight": float(np.clip(apfd_share_effective, 0.0, 1.0)),
+                }
+            )
+
         (sense_pl, sense_ca), miss_nominal, miss_alt = choose_optimal_sense(
             tgo,
             dt,
@@ -833,17 +939,12 @@ def run_batch(
             cat_above,
             vz0_pl,
             vz0_cat,
-            cat_delay_nom=5.0,
-            cat_accel_nom=0.25,
+            cat_delay_nom=cat_delay_eff,
+            cat_accel_nom=cat_accel_eff,
             cat_vs=CAT_INIT_VS_FPM,
             cat_cap=CAT_CAP_INIT_FPM,
+            cat_profiles=tuple(cat_profiles),
         )
-
-        cat_delay_eff = float(np.clip(rng.normal(5.0, 1.5), 2.5, 8.0))
-        if use_delay_mixture:
-            cat_accel_eff = float(np.clip(rng.normal(0.24, 0.02), 0.18, 0.28))
-        else:
-            cat_accel_eff = float(np.clip(rng.normal(0.25, 0.01), 0.22, 0.28))
 
         is_apfd = rng.uniform() < apfd_share_effective
         cat_is_apfd = bool(is_apfd)
@@ -1116,10 +1217,13 @@ def run_batch(
                 h0ft=h0,
                 aggressiveness=aggressiveness,
                 leveloff=int(leveloff_context),
+                cat_above=bool(cat_above),
                 sensePL=sense_pl,
                 senseCAT_chosen=sense_ca,
                 CAT_mode=mode,
                 senseCAT_exec=sense_cat_exec,
+                pl_vs0_init=vz0_pl,
+                cat_vs0_init=vz0_cat,
                 plDelay=pl_delay,
                 plAccel_g=PL_ACCEL_G,
                 catDelay=cat_delay_exec,
