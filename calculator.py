@@ -362,14 +362,6 @@ with tabs[1]:
         df = st.session_state['df']
         st.success(f"Completed {len(df)} runs.")
         st.caption(f"ALIM applied: {alim_selection_label} (±{selected_alim_ft:.0f} ft).")
-        exclude_flex = st.checkbox(
-            "Exclude ALIM−25 ft from breaches",
-            value=True,
-            help=(
-                "When enabled, CPA breaches that remain within 25 ft of ALIM are not counted."
-                " Disable to view the strict ALIM @ CPA rate."
-            ),
-        )
         total_runs = len(df)
         safe_total = max(total_runs, 1)
         c1, c2, c3, c4, c5, c6 = st.columns(6)
@@ -378,32 +370,59 @@ with tabs[1]:
         p_none = (df['eventtype'] == "NONE").sum() / safe_total
         p_alim_any = (df['margin_min_ft'] < 0.0).sum() / safe_total
         sep_reference = df['sep_cpa_ft']
-        p_alim_cpa_strict = df['alim_breach_cpa'].sum() / safe_total
-        p_alim_cpa_flex = df['alim_breach_cpa_excl25'].sum() / safe_total
+        p_alim_cpa = df['alim_breach_cpa'].sum() / safe_total
         c1.metric("P(Reversal)", f"{100 * p_rev:,.2f}%")
         c2.metric("P(Strengthen)", f"{100 * p_str:,.2f}%")
         c3.metric("P(None)", f"{100 * p_none:,.2f}%")
         c4.metric("P(ALIM Any)", f"{100 * p_alim_any:,.2f}%")
-        if exclude_flex:
-            c5.metric("P(ALIM @ CPA excl. 25 ft)", f"{100 * p_alim_cpa_flex:,.2f}%")
-            c6.metric("P(ALIM @ CPA strict)", f"{100 * p_alim_cpa_strict:,.2f}%")
-        else:
-            c5.metric("P(ALIM @ CPA strict)", f"{100 * p_alim_cpa_strict:,.2f}%")
-            c6.metric("P(ALIM @ CPA excl. 25 ft)", f"{100 * p_alim_cpa_flex:,.2f}%")
+        mean_cpa_sep = float(sep_reference.mean()) if total_runs else 0.0
+        apfd_exec_share = float(df['CAT_is_APFD'].mean()) if total_runs else 0.0
+        c5.metric("P(ALIM @ CPA)", f"{100 * p_alim_cpa:,.2f}%")
+        c6.metric("AP/FD executions", f"{100 * apfd_exec_share:,.2f}%")
         st.caption(
-            "Percentages describe RA outcomes alongside CPA ALIM breaches with the selected exclusion option"
-            " and the complementary strict rate for comparison."
+            "Percentages describe RA outcomes alongside CPA ALIM breaches without exclusions."
+            f" Mean miss @ CPA across the batch: {mean_cpa_sep:,.1f} ft."
+            f" AP/FD executions observed: {100 * apfd_exec_share:,.2f}% (target {100 * apfd_share_sanitized:,.2f}%)."
         )
-        near_25 = (sep_reference - df['ALIM_ft']).abs() <= 25.0
-        near_50 = (sep_reference - df['ALIM_ft']).abs() <= 50.0
-        near_100 = (sep_reference - df['ALIM_ft']).abs() <= 100.0
-        near_25_rate = near_25.sum() / safe_total
-        near_50_rate = near_50.sum() / safe_total
-        near_100_rate = near_100.sum() / safe_total
-        nm1, nm2, nm3 = st.columns(3)
-        nm1.metric("CPA within ±25 ft of ALIM", f"{100 * near_25_rate:,.2f}%")
-        nm2.metric("CPA within ±50 ft of ALIM", f"{100 * near_50_rate:,.2f}%")
-        nm3.metric("CPA within ±100 ft of ALIM", f"{100 * near_100_rate:,.2f}%")
+
+        breach_total = int(df['alim_breach_cpa'].sum())
+        band25_count = int(df['alim_breach_cpa_band25'].sum())
+        band50_count = int(df['alim_breach_cpa_band50'].sum())
+        band100_count = int(df['alim_breach_cpa_band100'].sum())
+        if breach_total:
+            band_rows = []
+            total_pct = 100.0 * breach_total / safe_total
+            band_rows.append(
+                {
+                    "Threshold": f"≤ ALIM ({selected_alim_ft:.0f} ft)",
+                    "Runs %": f"{total_pct:,.2f}%",
+                    "Share of breaches": "100.00%",
+                }
+            )
+
+            def band_entry(label: str, count: int, threshold_ft: float) -> None:
+                band_rows.append(
+                    {
+                        "Threshold": f"≤ {threshold_ft:.0f} ft ({label})",
+                        "Runs %": f"{100.0 * count / safe_total:,.2f}%",
+                        "Share of breaches": f"{100.0 * count / breach_total:,.2f}%",
+                    }
+                )
+
+            band_entry("ALIM−25", max(band25_count, 0), max(selected_alim_ft - 25.0, 0.0))
+            band_entry("ALIM−50", max(band50_count, 0), max(selected_alim_ft - 50.0, 0.0))
+            band_entry("ALIM−100", max(band100_count, 0), max(selected_alim_ft - 100.0, 0.0))
+
+            band_df = pd.DataFrame(band_rows)
+            st.markdown("**ALIM breach severity bands**")
+            st.table(band_df)
+            st.caption(
+                "Bands describe increasingly stringent CPA thresholds relative to ALIM."
+                " Shares are computed over the set of ALIM breaches."
+            )
+        else:
+            st.info("No ALIM breaches were observed in this batch.")
+
         mean_rr = float(df['residual_risk'].mean()) if total_runs else 0.0
         p95_rr = float(df['residual_risk'].quantile(0.95)) if total_runs else 0.0
         rr1, rr2 = st.columns(2)
@@ -479,7 +498,7 @@ with tabs[1]:
         )
 
         margin = sep_reference - df['ALIM_ft']
-        breach_mask = df['alim_breach_cpa_excl25'] if exclude_flex else df['alim_breach_cpa']
+        breach_mask = df['alim_breach_cpa']
         fig2, ax2 = plt.subplots(figsize=(8, 5))
 
         for evt in event_order:
@@ -503,7 +522,7 @@ with tabs[1]:
                 edgecolors='#000000',
                 s=60,
                 linewidths=0.8,
-                label='ALIM breach (selected CPA metric)',
+                label='ALIM breach (≤ ALIM)',
             )
 
         ax2.axhline(0.0, color='k', linestyle='--', linewidth=1, alpha=0.7)
@@ -516,10 +535,9 @@ with tabs[1]:
         st.pyplot(fig2)
 
         breach_rate = 100.0 * breach_mask.mean()
-        metric_label = "excluding ALIM−25 ft" if exclude_flex else "strict"
         st.caption(
             "Points below the dashed line represent CPA separations that fail to clear ALIM. "
-            f"{breach_rate:.2f}% of sampled runs breached ALIM at CPA ({metric_label}); highlighted markers show where they occur."
+            f"{breach_rate:.2f}% of sampled runs breached ALIM at CPA; highlighted markers show where they occur."
         )
 
         with st.expander("Inspect an individual run", expanded=False):
