@@ -71,6 +71,7 @@ def test_apply_second_phase_reverse_flips_senses_and_profiles():
     dt = 0.5
     sense_pl = +1
     sense_cat = -1
+    h0 = 800.0
 
     times, vs_pl = vs_time_series(
         tgo,
@@ -82,6 +83,14 @@ def test_apply_second_phase_reverse_flips_senses_and_profiles():
         cap_fpm=PL_VS_CAP_FPM,
     )
     _, vs_ca = vs_time_series(tgo, dt, 4.0, 0.20, CAT_INIT_VS_FPM, sense=sense_cat, cap_fpm=CAT_CAP_INIT_FPM)
+
+    z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
+    z_ca = integrate_altitude_from_vs(times, vs_ca, h0)
+    decision_latency = 1.0
+    latency = float(np.clip(decision_latency, 0.6, 1.4))
+    t2_issue_est = float(max(0.0, min(tgo, 8.0 + latency)))
+    z_pl_t2 = float(np.interp(t2_issue_est, times, z_pl))
+    z_ca_t2 = float(np.interp(t2_issue_est, times, z_ca))
 
     (
         times2,
@@ -104,6 +113,8 @@ def test_apply_second_phase_reverse_flips_senses_and_profiles():
         pl_vs0=0.0,
         cat_vs0=0.0,
         t_classify=8.0,
+        z_pl_t2=z_pl_t2,
+        z_cat_t2=z_ca_t2,
         pl_delay=PL_DELAY_MEAN_S,
         pl_accel_g=PL_ACCEL_G,
         pl_cap=PL_VS_CAP_FPM,
@@ -160,6 +171,11 @@ def test_apply_second_phase_reverse_improves_predicted_miss():
     z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
     z_ca = integrate_altitude_from_vs(times, vs_ca, h0)
     miss_before = abs(z_ca[-1] - z_pl[-1])
+    decision_latency = 1.0
+    latency = float(np.clip(decision_latency, 0.6, 1.4))
+    t2_issue_est = float(max(0.0, min(tgo, 8.0 + latency)))
+    z_pl_t2 = float(np.interp(t2_issue_est, times, z_pl))
+    z_ca_t2 = float(np.interp(t2_issue_est, times, z_ca))
 
     (
         times2,
@@ -182,6 +198,8 @@ def test_apply_second_phase_reverse_improves_predicted_miss():
         pl_vs0=0.0,
         cat_vs0=0.0,
         t_classify=8.0,
+        z_pl_t2=z_pl_t2,
+        z_cat_t2=z_ca_t2,
         pl_delay=PL_DELAY_MEAN_S,
         pl_accel_g=PL_ACCEL_G,
         pl_cap=PL_VS_CAP_FPM,
@@ -204,6 +222,85 @@ def test_apply_second_phase_reverse_improves_predicted_miss():
     assert miss_after > miss_before
 
 
+def test_apply_second_phase_reversal_guard_prevents_toward_pl_motion():
+    tgo = 20.0
+    dt = 0.5
+    sense_pl = +1
+    sense_cat = +1
+    h0 = 800.0
+
+    times, vs_pl = vs_time_series(
+        tgo,
+        dt,
+        PL_DELAY_MEAN_S,
+        PL_ACCEL_G,
+        PL_VS_FPM,
+        sense=sense_pl,
+        cap_fpm=PL_VS_CAP_FPM,
+    )
+    _, vs_ca = vs_time_series(
+        tgo,
+        dt,
+        4.0,
+        0.20,
+        CAT_INIT_VS_FPM,
+        sense=sense_cat,
+        cap_fpm=CAT_CAP_INIT_FPM,
+    )
+
+    z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
+    z_ca = integrate_altitude_from_vs(times, vs_ca, h0)
+
+    decision_latency = 1.0
+    latency = float(np.clip(decision_latency, 0.6, 1.4))
+    t_classify = 6.0
+    t2_issue_est = float(max(0.0, min(tgo, t_classify + latency)))
+    z_pl_t2 = float(np.interp(t2_issue_est, times, z_pl))
+    z_ca_t2 = float(np.interp(t2_issue_est, times, z_ca))
+
+    (
+        times2,
+        vs_pl2,
+        vs_ca2,
+        t_issue,
+        new_sense_pl,
+        new_sense_cat_exec,
+        new_sense_cat_cmd,
+    ) = apply_second_phase(
+        times,
+        vs_pl,
+        vs_ca,
+        tgo,
+        dt,
+        eventtype="REVERSE",
+        sense_pl=sense_pl,
+        sense_cat_exec=sense_cat,
+        sense_cat_cmd=sense_cat,
+        pl_vs0=0.0,
+        cat_vs0=0.0,
+        t_classify=t_classify,
+        z_pl_t2=z_pl_t2,
+        z_cat_t2=z_ca_t2,
+        pl_delay=PL_DELAY_MEAN_S,
+        pl_accel_g=PL_ACCEL_G,
+        pl_cap=PL_VS_CAP_FPM,
+        cat_delay=0.9,
+        cat_accel_g=0.35,
+        cat_vs_strength=CAT_STRENGTH_FPM,
+        cat_cap=CAT_CAP_STRENGTH_FPM,
+        decision_latency_s=decision_latency,
+    )
+
+    assert t_issue is not None
+    assert np.isclose(t_issue, t2_issue_est)
+    assert new_sense_pl == sense_pl
+    assert new_sense_cat_exec == sense_cat
+    assert new_sense_cat_cmd == sense_cat
+
+    idx_issue = int(np.where(np.isclose(times2, t_issue))[0][0])
+    assert np.all(vs_ca2[idx_issue:] >= -1e-6)
+
+
 def test_apply_second_phase_strengthen_weak_meets_nominal_targets():
     tgo = 20.0
     dt = 0.5
@@ -220,6 +317,14 @@ def test_apply_second_phase_strengthen_weak_meets_nominal_targets():
         cap_fpm=PL_VS_CAP_FPM,
     )
     _, vs_ca = vs_time_series(tgo, dt, 5.0, 0.18, CAT_INIT_VS_FPM, sense=sense_cat, cap_fpm=CAT_CAP_INIT_FPM)
+
+    z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
+    z_ca = integrate_altitude_from_vs(times, vs_ca, 0.0)
+    decision_latency = 1.0
+    latency = float(np.clip(decision_latency, 0.6, 1.4))
+    t2_issue_est = float(max(0.0, min(tgo, 10.0 + latency)))
+    z_pl_t2 = float(np.interp(t2_issue_est, times, z_pl))
+    z_ca_t2 = float(np.interp(t2_issue_est, times, z_ca))
 
     (
         times2,
@@ -242,6 +347,8 @@ def test_apply_second_phase_strengthen_weak_meets_nominal_targets():
         pl_vs0=0.0,
         cat_vs0=0.0,
         t_classify=10.0,
+        z_pl_t2=z_pl_t2,
+        z_cat_t2=z_ca_t2,
         pl_delay=PL_DELAY_MEAN_S,
         pl_accel_g=PL_ACCEL_G,
         pl_cap=PL_VS_CAP_FPM,
@@ -293,6 +400,14 @@ def test_apply_second_phase_force_exigent_strengthen_uses_exigent_profile():
     )
     _, vs_ca = vs_time_series(tgo, dt, 5.0, 0.18, CAT_INIT_VS_FPM, sense=sense_cat, cap_fpm=CAT_CAP_INIT_FPM)
 
+    z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
+    z_ca = integrate_altitude_from_vs(times, vs_ca, 0.0)
+    decision_latency = 0.8
+    latency = float(np.clip(decision_latency, 0.6, 1.4))
+    t2_issue_est = float(max(0.0, min(tgo, 7.0 + latency)))
+    z_pl_t2 = float(np.interp(t2_issue_est, times, z_pl))
+    z_ca_t2 = float(np.interp(t2_issue_est, times, z_ca))
+
     (
         times2,
         _,
@@ -314,6 +429,8 @@ def test_apply_second_phase_force_exigent_strengthen_uses_exigent_profile():
         pl_vs0=0.0,
         cat_vs0=0.0,
         t_classify=7.0,
+        z_pl_t2=z_pl_t2,
+        z_cat_t2=z_ca_t2,
         pl_delay=PL_DELAY_MEAN_S,
         pl_accel_g=PL_ACCEL_G,
         pl_cap=PL_VS_CAP_FPM,
