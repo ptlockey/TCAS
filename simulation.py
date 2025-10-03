@@ -21,8 +21,8 @@ FT_PER_M = 3.28084
 MS_PER_FPM = 0.00508      # 1 fpm = 0.00508 m/s
 
 # PL (performance-limited) parameters
-PL_DELAY_MEAN_S = 2.2    # adjust if you require 0.9 s globally
-PL_DELAY_SD_S   = 0.4
+PL_DELAY_MEAN_S = 0.9
+PL_DELAY_SD_S   = 0.0
 PL_ACCEL_G      = 0.10
 PL_VS_FPM       = 500.0
 PL_VS_CAP_FPM   = 500.0
@@ -44,8 +44,13 @@ ALIM_MARGIN_FT = 100.0
 
 def sanitize_tgo_bounds(
     tgo_min_s: Optional[float], tgo_max_s: Optional[float]
-) -> Tuple[float, float, float, float]:
-    """Return clipped (lo, hi, mu, sd) for custom t_go windows."""
+) -> Tuple[float, float, float]:
+    """Return clipped (lo, hi, mode) for custom t_go windows.
+
+    The mode is centred on the mid-point of the requested window while being
+    restricted to the regulatory 24–26 s region whenever feasible. This makes it
+    suitable for triangular sampling that still honours the requested bounds.
+    """
 
     lo_raw = TGO_MIN_S if tgo_min_s is None else float(tgo_min_s)
     hi_raw = TGO_MAX_S if tgo_max_s is None else float(tgo_max_s)
@@ -53,9 +58,13 @@ def sanitize_tgo_bounds(
     hi = float(np.clip(hi_raw, TGO_MIN_S, TGO_MAX_S))
     if hi <= lo + 1e-3:
         hi = min(TGO_MAX_S, lo + 1.0)
-    mu = float(np.clip(0.5 * (lo + hi), 24.0, 26.0))
-    sd = max((hi - lo) / 6.0, 0.5)
-    return lo, hi, mu, sd
+
+    midpoint = 0.5 * (lo + hi)
+    preferred = float(np.clip(midpoint, lo + 1e-3, hi - 1e-3))
+    mode = float(np.clip(preferred, 24.0, 26.0))
+    mode = float(np.clip(mode, lo + 1e-3, hi - 1e-3))
+
+    return lo, hi, mode
 
 # ------------------------ Utility functions ------------------------
 
@@ -368,7 +377,7 @@ def apply_non_compliance_to_cat(
             float(np.clip(vs_fpm * rng.uniform(0.55, 0.75), 900.0, 1200.0)),
             float(np.clip(cap_fpm * rng.uniform(0.55, 0.80), 900.0, 1300.0)),
         )
-    compliant_accel = float(np.clip(base_accel_g, 0.20, 0.25))
+    compliant_accel = 0.25
     return ("compliant", sense_cat, base_delay_s, compliant_accel, vs_fpm, cap_fpm)
 
 
@@ -441,8 +450,8 @@ def apply_second_phase(
     pl_delay: float = PL_DELAY_MEAN_S,
     pl_accel_g: float = PL_ACCEL_G,
     pl_cap: float = PL_VS_CAP_FPM,
-    cat_delay: float = 1.0,
-    cat_accel_g: float = 0.20,
+    cat_delay: float = 0.9,
+    cat_accel_g: float = 0.35,
     cat_vs_strength: float = CAT_STRENGTH_FPM,
     cat_cap: float = CAT_CAP_STRENGTH_FPM,
     decision_latency_s: float = 1.0,
@@ -577,9 +586,9 @@ def run_batch(
         apfd_share_effective = float(np.clip(apfd_share, 0.0, 1.0))
 
     if use_custom_tgo:
-        lo_user, hi_user, mu_user, sd_user = sanitize_tgo_bounds(tgo_min_s, tgo_max_s)
+        lo_user, hi_user, mode_user = sanitize_tgo_bounds(tgo_min_s, tgo_max_s)
     else:
-        lo_user = hi_user = mu_user = sd_user = None
+        lo_user = hi_user = mode_user = None
 
     for k in range(int(runs)):
         FL_PL, FL_CAT, h0 = sample_altitudes_and_h0(rng)
@@ -597,20 +606,18 @@ def run_batch(
             h1, h2 = sample_headings(rng, scenario, 0.0, 360.0, rel_min, rel_max)
         vcl = relative_closure_kt(PL_TAS, h1, CAT_TAS, h2)
         if use_custom_tgo and vcl > 1e-6:
-            lo = lo_user
-            hi = hi_user
-            mu = mu_user
-            sd = sd_user
-            tgo = float(np.clip(rng.normal(mu, sd), lo, hi))
+            lo = float(lo_user)
+            hi = float(hi_user)
+            mode = float(np.clip(mode_user, lo + 1e-3, hi - 1e-3))
+            tgo = float(rng.triangular(lo, mode, hi))
             r0 = (vcl * tgo) / 3600.0
         else:
             r0 = float(rng.uniform(min(r0_min_nm, r0_max_nm), max(r0_min_nm, r0_max_nm)))
             tgo_geom = time_to_go_from_geometry(r0, vcl)
             if use_custom_tgo:
-                lo = lo_user
-                hi = hi_user
-                mu = mu_user
-                sd = sd_user
+                lo = float(lo_user)
+                hi = float(hi_user)
+                mode = float(mode_user)
             else:
                 lo = TGO_MIN_S
                 hi = TGO_MAX_S
@@ -622,10 +629,17 @@ def run_batch(
                     mu, sd = 30.0, 8.0
             if tgo_geom is not None:
                 hi = min(hi, tgo_geom)
-            hi = float(np.clip(hi, lo + 0.5, TGO_MAX_S))
-            if hi <= lo + 1e-3:
-                hi = min(TGO_MAX_S, lo + 1.0)
-            tgo = float(np.clip(rng.normal(mu, sd), lo, hi))
+            if use_custom_tgo:
+                hi = float(np.clip(hi, lo + 1e-3, TGO_MAX_S))
+                if hi <= lo + 1e-3:
+                    hi = min(TGO_MAX_S, lo + 1.0)
+                mode = float(np.clip(mode, lo + 1e-3, hi - 1e-3))
+                tgo = float(rng.triangular(lo, mode, hi))
+            else:
+                hi = float(np.clip(hi, lo + 0.5, TGO_MAX_S))
+                if hi <= lo + 1e-3:
+                    hi = min(TGO_MAX_S, lo + 1.0)
+                tgo = float(np.clip(rng.normal(mu, sd), lo, hi))
             if use_custom_tgo and vcl <= 1e-6:
                 # Degenerate geometry; retain user-specified range settings.
                 r0 = float(rng.uniform(min(r0_min_nm, r0_max_nm), max(r0_min_nm, r0_max_nm)))
@@ -660,11 +674,15 @@ def run_batch(
             cat_accel_eff = 0.22
 
         is_apfd = rng.uniform() < apfd_share_effective
-        cat_is_apfd = bool(is_apfd and apfd_mode_key != "custom")
-        if apfd_mode_key == "custom":
-            if is_apfd:
-                cat_delay_eff = max(0.0, cat_delay_eff - 0.8)
-                cat_accel_eff = float(np.clip(cat_accel_eff + 0.03, 0.20, 0.25))
+        cat_is_apfd = bool(is_apfd)
+        if is_apfd:
+            mode = "AP/FD"
+            sense_cat_exec = sense_ca
+            cat_delay_exec = 0.9
+            cat_accel_exec = 0.25
+            cat_vs_exec = CAT_INIT_VS_FPM
+            cat_cap_exec = CAT_CAP_INIT_FPM
+        else:
             (
                 mode,
                 sense_cat_exec,
@@ -684,34 +702,6 @@ def run_batch(
                 p_weak=p_weak,
                 jitter=jitter_priors,
             )
-        else:
-            if is_apfd:
-                mode = "AP/FD"
-                sense_cat_exec = sense_ca
-                cat_delay_exec = 1.25
-                cat_accel_exec = 0.20
-                cat_vs_exec = CAT_INIT_VS_FPM
-                cat_cap_exec = CAT_CAP_INIT_FPM
-            else:
-                (
-                    mode,
-                    sense_cat_exec,
-                    cat_delay_exec,
-                    cat_accel_exec,
-                    cat_vs_exec,
-                    cat_cap_exec,
-                ) = apply_non_compliance_to_cat(
-                    rng,
-                    sense_ca,
-                    base_delay_s=cat_delay_eff,
-                    base_accel_g=cat_accel_eff,
-                    vs_fpm=CAT_INIT_VS_FPM,
-                    cap_fpm=CAT_CAP_INIT_FPM,
-                    p_opp=p_opp,
-                    p_taonly=p_ta,
-                    p_weak=p_weak,
-                    jitter=jitter_priors,
-                )
 
         pl_delay = max(0.0, rng.normal(PL_DELAY_MEAN_S, PL_DELAY_SD_S))
 
@@ -770,8 +760,8 @@ def run_batch(
                 pl_delay=pl_delay,
                 pl_accel_g=PL_ACCEL_G,
                 pl_cap=PL_VS_CAP_FPM,
-                cat_delay=1.0,
-                cat_accel_g=0.20,
+                cat_delay=0.9,
+                cat_accel_g=0.35,
                 cat_vs_strength=CAT_STRENGTH_FPM,
                 cat_cap=CAT_CAP_STRENGTH_FPM,
                 decision_latency_s=float(np.clip(rng.normal(1.0, 0.2), 0.6, 1.4)),

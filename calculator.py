@@ -31,6 +31,7 @@ from simulation import (
     CAT_INIT_VS_FPM,
     CAT_STRENGTH_FPM,
     PL_ACCEL_G,
+    PL_DELAY_MEAN_S,
     PL_IAS_KT,
     PL_VS_CAP_FPM,
     PL_VS_FPM,
@@ -283,7 +284,7 @@ with tabs[0]:
             else:
                 sense_cat = 0
 
-            times, vs_pl = vs_time_series(t_cpa, float(dt), 0.9, PL_ACCEL_G, PL_VS_FPM,
+            times, vs_pl = vs_time_series(t_cpa, float(dt), PL_DELAY_MEAN_S, PL_ACCEL_G, PL_VS_FPM,
                                           sense=sense_pl, cap_fpm=PL_VS_CAP_FPM, vs0_fpm=0.0)
 
             if sense_cat == 0 or cat_vs_user <= 1e-6:

@@ -8,8 +8,11 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from simulation import (
     CAT_CAP_INIT_FPM,
+    CAT_CAP_STRENGTH_FPM,
     CAT_INIT_VS_FPM,
+    CAT_STRENGTH_FPM,
     PL_ACCEL_G,
+    PL_DELAY_MEAN_S,
     PL_VS_CAP_FPM,
     PL_VS_FPM,
     apply_second_phase,
@@ -33,7 +36,15 @@ def test_apply_second_phase_reverse_changes_sense():
     sense_pl = +1
     sense_cat = -1
 
-    times, vs_pl = vs_time_series(tgo, dt, 1.0, PL_ACCEL_G, PL_VS_FPM, sense=sense_pl, cap_fpm=PL_VS_CAP_FPM)
+    times, vs_pl = vs_time_series(
+        tgo,
+        dt,
+        PL_DELAY_MEAN_S,
+        PL_ACCEL_G,
+        PL_VS_FPM,
+        sense=sense_pl,
+        cap_fpm=PL_VS_CAP_FPM,
+    )
     _, vs_ca = vs_time_series(tgo, dt, 4.0, 0.20, CAT_INIT_VS_FPM, sense=sense_cat, cap_fpm=CAT_CAP_INIT_FPM)
 
     times2, vs_pl2, vs_ca2, t_issue = apply_second_phase(
@@ -48,13 +59,13 @@ def test_apply_second_phase_reverse_changes_sense():
         pl_vs0=0.0,
         cat_vs0=0.0,
         t_classify=8.0,
-        pl_delay=1.0,
+        pl_delay=PL_DELAY_MEAN_S,
         pl_accel_g=PL_ACCEL_G,
         pl_cap=PL_VS_CAP_FPM,
-        cat_delay=1.0,
-        cat_accel_g=0.20,
-        cat_vs_strength=CAT_INIT_VS_FPM,
-        cat_cap=CAT_CAP_INIT_FPM,
+        cat_delay=0.9,
+        cat_accel_g=0.35,
+        cat_vs_strength=CAT_STRENGTH_FPM,
+        cat_cap=CAT_CAP_STRENGTH_FPM,
         decision_latency_s=1.0,
     )
 
