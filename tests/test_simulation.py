@@ -17,6 +17,7 @@ from simulation import (
     PL_DELAY_MEAN_S,
     PL_VS_CAP_FPM,
     PL_VS_FPM,
+    REVERSAL_MONITOR_DELAY_S,
     choose_optimal_sense,
     apply_second_phase,
     classify_event,
@@ -464,6 +465,36 @@ def test_classify_event_manual_intruder_delay_waits_before_reversing():
     assert eventtype in {"NONE", "STRENGTHEN"}
     if eventtype == "STRENGTHEN":
         assert event_detail in {None, "EXIGENT_STRENGTHEN"}
+
+
+def test_classify_event_delayed_compliance_strengthens_not_reverses():
+    tgo = 25.0
+    dt = 1.0
+
+    times = np.arange(0.0, tgo + 1e-9, dt)
+    vs_pl = np.full_like(times, 1000.0)
+    vs_ca = np.zeros_like(times)
+
+    z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
+    z_ca = integrate_altitude_from_vs(times, vs_ca, 400.0)
+
+    eventtype, _, _, t_detect, event_detail = classify_event(
+        times=times,
+        z_pl=z_pl,
+        z_ca=z_ca,
+        vs_pl=vs_pl,
+        vs_ca=vs_ca,
+        tgo=tgo,
+        alim_ft=400.0,
+        margin_ft=100.0,
+        sense_chosen_cat=+1,
+        sense_exec_cat=+1,
+        manual_case=False,
+    )
+
+    assert eventtype == "STRENGTHEN"
+    assert event_detail == "EXIGENT_STRENGTHEN"
+    assert t_detect >= REVERSAL_MONITOR_DELAY_S
 
 
 def test_classify_event_strengthen_fires_on_predicted_miss_when_time_allows():
