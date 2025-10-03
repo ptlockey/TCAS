@@ -65,7 +65,7 @@ def test_vs_time_series_post_delay_slope_matches_commanded_accel():
         assert np.allclose(slopes, sense * expected_slope, atol=1e-6)
 
 
-def test_apply_second_phase_reverse_changes_sense():
+def test_apply_second_phase_reverse_keeps_pl_profile():
     tgo = 20.0
     dt = 0.5
     sense_pl = +1
@@ -105,7 +105,15 @@ def test_apply_second_phase_reverse_changes_sense():
     )
 
     assert t_issue is not None
-    assert vs_pl2[-1] < 0.0  # PL reverses to descend eventually
+
+    interpolated_pl = np.interp(times2, times, vs_pl)
+    assert np.allclose(vs_pl2, interpolated_pl)
+
+    z_pl_orig = integrate_altitude_from_vs(times, vs_pl, 0.0)
+    z_pl2 = integrate_altitude_from_vs(times2, vs_pl2, 0.0)
+    interpolated_z = np.interp(times2, times, z_pl_orig)
+    assert np.allclose(z_pl2, interpolated_z)
+    assert vs_pl2[-1] > 0.0  # PL continues original climb sense
     assert vs_ca2[-1] > 0.0  # CAT reverses to climb eventually
 
 

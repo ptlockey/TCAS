@@ -722,7 +722,7 @@ def apply_second_phase(
     vs_pl_now = float(np.interp(t2_issue, times, vs_pl))
     vs_ca_now = float(np.interp(t2_issue, times, vs_ca))
 
-    new_sense_pl = sense_pl if eventtype == "STRENGTHEN" else -sense_pl
+    new_sense_pl = sense_pl
     new_sense_cat = sense_cat_exec if eventtype == "STRENGTHEN" else -sense_cat_exec
 
     mode_key = (cat_mode or "").lower().strip()
@@ -754,16 +754,20 @@ def apply_second_phase(
         cat_vs_eff = cat_vs_strength
         cat_cap_eff = cat_cap
 
-    t2_rel, vs_pl_cont = vs_time_series(
-        t_rem,
-        dt,
-        pl_delay,
-        pl_accel_g,
-        pl_cap,
-        sense=new_sense_pl,
-        cap_fpm=pl_cap,
-        vs0_fpm=vs_pl_now,
-    )
+    if eventtype == "REVERSE":
+        t2_rel = np.arange(0.0, t_rem + 1e-9, dt)
+        vs_pl_cont = np.interp(t2_issue + t2_rel, times, vs_pl)
+    else:
+        t2_rel, vs_pl_cont = vs_time_series(
+            t_rem,
+            dt,
+            pl_delay,
+            pl_accel_g,
+            pl_cap,
+            sense=new_sense_pl,
+            cap_fpm=pl_cap,
+            vs0_fpm=vs_pl_now,
+        )
     _, vs_ca_cont = vs_time_series(
         t_rem,
         dt,
@@ -1165,7 +1169,6 @@ def run_batch(
             )
 
             if eventtype == "REVERSE":
-                current_sense_pl = -current_sense_pl
                 current_sense_cat_exec = -current_sense_cat_exec
                 current_sense_chosen = -current_sense_chosen
 
