@@ -44,9 +44,6 @@ ALIM_MARGIN_FT = 100.0
 # Time-to-go guard before reversal monitoring can act (s)
 REVERSAL_GUARD_TAU_S = 12.0
 
-# Flexible margin for reporting ALIM breaches at CPA (ft)
-ALIM_FLEX_FT = 25.0
-
 # Predicted-miss pad for triggering strengthen early (ft)
 STRENGTHEN_PAD_FT = 150.0
 
@@ -772,7 +769,8 @@ def run_batch(
 
         PL_TAS = ias_to_tas(PL_IAS_KT, FL_PL * 100.0)
         if force_cat_ias_250:
-            CAT_TAS = ias_to_tas(250.0, FL_CAT * 100.0)
+            ref_alt_ft = min(FL_CAT * 100.0, 10000.0)
+            CAT_TAS = ias_to_tas(250.0, ref_alt_ft)
         else:
             CAT_TAS = float(rng.uniform(420.0, 470.0))
         if scenario == "Custom":
@@ -1065,9 +1063,13 @@ def run_batch(
         margin_trace = sep_trace - alim_ft
         margin_min_ft = float(np.min(margin_trace))
         margin_cpa_ft = float(sep_trace[-1] - alim_ft)
-        alim_breach_cpa = bool(sep_trace[-1] < alim_ft)
-        flex_threshold = max(0.0, alim_ft - ALIM_FLEX_FT)
-        alim_breach_cpa_flex = bool(sep_trace[-1] < flex_threshold)
+        alim_breach_cpa = bool(sep_trace[-1] <= alim_ft)
+        band25_threshold = max(0.0, alim_ft - 25.0)
+        band50_threshold = max(0.0, alim_ft - 50.0)
+        band100_threshold = max(0.0, alim_ft - 100.0)
+        alim_breach_band25 = bool(sep_trace[-1] <= band25_threshold)
+        alim_breach_band50 = bool(sep_trace[-1] <= band50_threshold)
+        alim_breach_band100 = bool(sep_trace[-1] <= band100_threshold)
 
         delta_pl = float(z_pl[-1] - z_pl[0])
         delta_cat = float(z_ca[-1] - z_ca[0])
@@ -1113,7 +1115,9 @@ def run_batch(
                 margin_min_ft=margin_min_ft,
                 margin_cpa_ft=margin_cpa_ft,
                 alim_breach_cpa=alim_breach_cpa,
-                alim_breach_cpa_excl25=alim_breach_cpa_flex,
+                alim_breach_cpa_band25=alim_breach_band25,
+                alim_breach_cpa_band50=alim_breach_band50,
+                alim_breach_cpa_band100=alim_breach_band100,
                 eventtype=eventtype_initial,
                 event_detail=event_detail_initial,
                 t_detect=t_detect_initial,
