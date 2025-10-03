@@ -222,8 +222,8 @@ def test_classify_event_reversal_guard_uses_time_to_go():
     )
 
     assert eventtype == "REVERSE"
-    assert event_detail == "Opposite sense"
-    assert np.isclose(t_detect, 20.0 - REVERSAL_SHORT_TAU_S)
+    assert event_detail == "Exigent wrong-sense"
+    assert np.isclose(t_detect, 0.0)
 
 
 def test_classify_event_standard_cat_delay_is_not_reversal_trigger():
@@ -290,7 +290,7 @@ def test_classify_event_strengthen_fires_on_predicted_miss_when_time_allows():
     z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
     z_ca = integrate_altitude_from_vs(times, vs_ca, 900.0)
 
-    eventtype, _, _, t_detect, _ = classify_event(
+    eventtype, _, _, t_detect, event_detail = classify_event(
         times=times,
         z_pl=z_pl,
         z_ca=z_ca,
@@ -303,7 +303,8 @@ def test_classify_event_strengthen_fires_on_predicted_miss_when_time_allows():
         sense_exec_cat=+1,
     )
 
-    assert eventtype == "STRENGTHEN"
+    assert eventtype == "REVERSE"
+    assert event_detail == "Exigent wrong-sense"
     assert np.isclose(t_detect, 4.0)
 
 
@@ -326,7 +327,7 @@ def test_classify_event_strengthen_triggers_even_when_time_short():
     z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
     z_ca = integrate_altitude_from_vs(times, vs_ca, 900.0)
 
-    eventtype, _, _, _, _ = classify_event(
+    eventtype, _, _, t_detect, event_detail = classify_event(
         times=times,
         z_pl=z_pl,
         z_ca=z_ca,
@@ -339,7 +340,9 @@ def test_classify_event_strengthen_triggers_even_when_time_short():
         sense_exec_cat=+1,
     )
 
-    assert eventtype == "STRENGTHEN"
+    assert eventtype == "REVERSE"
+    assert event_detail == "Exigent wrong-sense"
+    assert np.isclose(t_detect, 4.0)
 
 
 def test_classify_event_no_response_triggers_exigent_strengthen():
