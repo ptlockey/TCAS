@@ -15,7 +15,8 @@ from simulation import (
     PL_DELAY_MEAN_S,
     PL_VS_CAP_FPM,
     PL_VS_FPM,
-    REVERSAL_GUARD_TGO_S,
+    REVERSAL_GUARD_TAU_S,
+    REVERSAL_SHORT_TAU_S,
     apply_second_phase,
     classify_event,
     integrate_altitude_from_vs,
@@ -222,7 +223,7 @@ def test_classify_event_reversal_guard_uses_time_to_go():
 
     assert eventtype == "REVERSE"
     assert event_detail == "Opposite sense"
-    assert np.isclose(t_detect, 20.0 - REVERSAL_GUARD_TGO_S)
+    assert np.isclose(t_detect, 20.0 - REVERSAL_SHORT_TAU_S)
 
 
 def test_classify_event_standard_cat_delay_is_not_reversal_trigger():
@@ -303,10 +304,10 @@ def test_classify_event_strengthen_fires_on_predicted_miss_when_time_allows():
     )
 
     assert eventtype == "STRENGTHEN"
-    assert np.isclose(t_detect, 13.0)
+    assert np.isclose(t_detect, 4.0)
 
 
-def test_classify_event_strengthen_suppressed_when_time_short():
+def test_classify_event_strengthen_triggers_even_when_time_short():
     tgo = 15.0
     dt = 1.0
 
@@ -338,7 +339,7 @@ def test_classify_event_strengthen_suppressed_when_time_short():
         sense_exec_cat=+1,
     )
 
-    assert eventtype != "STRENGTHEN"
+    assert eventtype == "STRENGTHEN"
 
 
 def test_classify_event_no_response_triggers_exigent_strengthen():
