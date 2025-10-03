@@ -15,7 +15,6 @@ Implements the requested amendments on top of your functioning codebase:
 """
 from __future__ import annotations
 
-import io
 from typing import Optional, Tuple
 
 import numpy as np
@@ -411,13 +410,22 @@ with tabs[1]:
         rr1.metric("Residual risk (mean)", f"{100 * mean_rr:,.3f}%")
         rr2.metric("Residual risk (95th pct)", f"{100 * p95_rr:,.3f}%")
         if (df['eventtype'] == "REVERSE").any():
-            reasons = (
-                df.loc[df['eventtype'] == "REVERSE", 'reverse_reason']
-                .fillna('Unclassified')
-                .value_counts(normalize=True)
-            )
-            reason_text = ", ".join(f"{k}: {100 * v:,.1f}%" for k, v in reasons.items())
-            st.caption(f"Reversal drivers — {reason_text}.")
+            detail_column = None
+            for candidate in ("reverse_reason", "event_detail_final", "event_detail"):
+                if candidate in df.columns:
+                    detail_column = candidate
+                    break
+
+            if detail_column is not None:
+                reasons = (
+                    df.loc[df['eventtype'] == "REVERSE", detail_column]
+                    .fillna('Unclassified')
+                    .value_counts(normalize=True)
+                )
+                reason_text = ", ".join(f"{k}: {100 * v:,.1f}%" for k, v in reasons.items())
+                st.caption(f"Reversal drivers — {reason_text}.")
+            else:
+                st.caption("Reversal details unavailable for this batch.")
         else:
             st.caption("No reversals observed in this batch.")
 
@@ -561,10 +569,13 @@ with tabs[1]:
 
 
         # Download
-        buf = io.BytesIO()
-        buf.write(df.to_csv(index=False).encode('utf-8'))
-        buf.seek(0)
-        st.download_button("Download CSV", buf, file_name="tcas_batch_results_v71.csv", mime="text/csv")
+        csv_bytes = df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            "Download CSV",
+            csv_bytes,
+            file_name="tcas_batch_results_v71.csv",
+            mime="text/csv",
+        )
 
  
 
