@@ -394,3 +394,37 @@ def test_run_batch_deterministic_seed():
 
     assert len(df1) == len(df2) == 20
     pdt.assert_frame_equal(df1.reset_index(drop=True), df2.reset_index(drop=True))
+
+
+def test_run_batch_records_maneuver_sequence():
+    df = run_batch(
+        runs=5,
+        seed=321,
+        jitter_priors=False,
+        use_delay_mixture=False,
+        apfd_share=0.0,
+    )
+
+    assert "maneuver_sequence" in df.columns
+    assert "eventtype_final" in df.columns
+    assert "t_detect_final" in df.columns
+
+    for _, row in df.iterrows():
+        seq = row["maneuver_sequence"]
+        assert isinstance(seq, tuple)
+        assert len(seq) >= 1
+
+        first = seq[0]
+        last = seq[-1]
+
+        assert row["eventtype"] == first["eventtype"]
+        assert np.isclose(row["t_detect"], first["t_issue"])
+        assert np.isclose(row["tau_detect"], first["tau_issue"])
+        assert row["eventtype_final"] == last["eventtype"]
+        assert np.isclose(row["t_detect_final"], last["t_issue"])
+        assert np.isclose(row["tau_detect_final"], last["tau_issue"])
+
+        second_issue = row["t_second_issue"]
+        if second_issue is not None and not np.isnan(second_issue):
+            assert second_issue >= first["t_issue"]
+            assert np.isclose(row["tau_second_issue"], row["tgos"] - second_issue)
