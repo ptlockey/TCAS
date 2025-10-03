@@ -363,12 +363,12 @@ with tabs[1]:
         df = st.session_state['df']
         st.success(f"Completed {len(df)} runs.")
         st.caption(f"ALIM applied: {alim_selection_label} (±{selected_alim_ft:.0f} ft).")
-        report_alim_outside = st.checkbox(
-            "Report ALIM @ CPA outside ±1 s window",
-            value=False,
+        exclude_flex = st.checkbox(
+            "Exclude ALIM−25 ft from breaches",
+            value=True,
             help=(
-                "When enabled the CPA metric uses the minimum separation within ±1 s of CPA; a companion metric highlights"
-                " breaches that only occur outside that window."
+                "When enabled, CPA breaches that remain within 25 ft of ALIM are not counted."
+                " Disable to view the strict ALIM @ CPA rate."
             ),
         )
         total_runs = len(df)
@@ -379,24 +379,22 @@ with tabs[1]:
         p_none = (df['eventtype'] == "NONE").sum() / safe_total
         p_alim_any = (df['margin_min_ft'] < 0.0).sum() / safe_total
         sep_reference = df['sep_cpa_ft']
-        alim_cpa_series = df['alim_breach_cpa']
-        if report_alim_outside:
-            sep_reference = df.get('sep_window_min_ft', sep_reference)
-            alim_cpa_series = df.get('alim_breach_cpa_window', df['alim_breach_margin'])
-        p_alim_cpa = alim_cpa_series.sum() / safe_total
-        p_alim_window = df['alim_breach_margin'].sum() / safe_total
-        p_alim_outside = df['alim_breach_outside'].sum() / safe_total
+        p_alim_cpa_strict = df['alim_breach_cpa'].sum() / safe_total
+        p_alim_cpa_flex = df['alim_breach_cpa_excl25'].sum() / safe_total
         c1.metric("P(Reversal)", f"{100 * p_rev:,.2f}%")
         c2.metric("P(Strengthen)", f"{100 * p_str:,.2f}%")
         c3.metric("P(None)", f"{100 * p_none:,.2f}%")
         c4.metric("P(ALIM Any)", f"{100 * p_alim_any:,.2f}%")
-        if report_alim_outside:
-            c5.metric("P(ALIM @ CPA (±1 s window))", f"{100 * p_alim_cpa:,.2f}%")
-            c6.metric("P(ALIM outside ±1 s)", f"{100 * p_alim_outside:,.2f}%")
+        if exclude_flex:
+            c5.metric("P(ALIM @ CPA excl. 25 ft)", f"{100 * p_alim_cpa_flex:,.2f}%")
+            c6.metric("P(ALIM @ CPA strict)", f"{100 * p_alim_cpa_strict:,.2f}%")
         else:
-            c5.metric("P(ALIM @ CPA)", f"{100 * p_alim_cpa:,.2f}%")
-            c6.metric("P(ALIM within ±1 s)", f"{100 * p_alim_window:,.2f}%")
-        st.caption("Percentages describe RA outcomes alongside ALIM breaches at CPA, respecting the selected ±1 s window option, and anywhere in the run.")
+            c5.metric("P(ALIM @ CPA strict)", f"{100 * p_alim_cpa_strict:,.2f}%")
+            c6.metric("P(ALIM @ CPA excl. 25 ft)", f"{100 * p_alim_cpa_flex:,.2f}%")
+        st.caption(
+            "Percentages describe RA outcomes alongside CPA ALIM breaches with the selected exclusion option"
+            " and the complementary strict rate for comparison."
+        )
         near_25 = (sep_reference - df['ALIM_ft']).abs() <= 25.0
         near_50 = (sep_reference - df['ALIM_ft']).abs() <= 50.0
         near_100 = (sep_reference - df['ALIM_ft']).abs() <= 100.0
@@ -473,7 +471,7 @@ with tabs[1]:
         )
 
         margin = sep_reference - df['ALIM_ft']
-        breach_mask = margin < 0.0
+        breach_mask = df['alim_breach_cpa_excl25'] if exclude_flex else df['alim_breach_cpa']
         fig2, ax2 = plt.subplots(figsize=(8, 5))
 
         for evt in event_order:
@@ -510,9 +508,10 @@ with tabs[1]:
         st.pyplot(fig2)
 
         breach_rate = 100.0 * breach_mask.mean()
+        metric_label = "excluding ALIM−25 ft" if exclude_flex else "strict"
         st.caption(
             "Points below the dashed line represent CPA separations that fail to clear ALIM. "
-            f"{breach_rate:.2f}% of sampled runs breached ALIM at CPA; highlighted markers show where they occur."
+            f"{breach_rate:.2f}% of sampled runs breached ALIM at CPA ({metric_label}); highlighted markers show where they occur."
         )
 
         with st.expander("Inspect an individual run", expanded=False):
