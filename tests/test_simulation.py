@@ -8,8 +8,11 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from simulation import (
     CAT_CAP_INIT_FPM,
+    CAT_CAP_STRENGTH_FPM,
     CAT_INIT_VS_FPM,
+    CAT_STRENGTH_FPM,
     PL_ACCEL_G,
+    PL_DELAY_MEAN_S,
     PL_VS_CAP_FPM,
     PL_VS_FPM,
     apply_second_phase,
@@ -33,7 +36,15 @@ def test_apply_second_phase_reverse_changes_sense():
     sense_pl = +1
     sense_cat = -1
 
-    times, vs_pl = vs_time_series(tgo, dt, 1.0, PL_ACCEL_G, PL_VS_FPM, sense=sense_pl, cap_fpm=PL_VS_CAP_FPM)
+    times, vs_pl = vs_time_series(
+        tgo,
+        dt,
+        PL_DELAY_MEAN_S,
+        PL_ACCEL_G,
+        PL_VS_FPM,
+        sense=sense_pl,
+        cap_fpm=PL_VS_CAP_FPM,
+    )
     _, vs_ca = vs_time_series(tgo, dt, 4.0, 0.20, CAT_INIT_VS_FPM, sense=sense_cat, cap_fpm=CAT_CAP_INIT_FPM)
 
     times2, vs_pl2, vs_ca2, t_issue = apply_second_phase(
@@ -48,19 +59,79 @@ def test_apply_second_phase_reverse_changes_sense():
         pl_vs0=0.0,
         cat_vs0=0.0,
         t_classify=8.0,
-        pl_delay=1.0,
+        pl_delay=PL_DELAY_MEAN_S,
         pl_accel_g=PL_ACCEL_G,
         pl_cap=PL_VS_CAP_FPM,
-        cat_delay=1.0,
-        cat_accel_g=0.20,
-        cat_vs_strength=CAT_INIT_VS_FPM,
-        cat_cap=CAT_CAP_INIT_FPM,
+        cat_delay=0.9,
+        cat_accel_g=0.35,
+        cat_vs_strength=CAT_STRENGTH_FPM,
+        cat_cap=CAT_CAP_STRENGTH_FPM,
         decision_latency_s=1.0,
     )
 
     assert t_issue is not None
     assert vs_pl2[-1] < 0.0  # PL reverses to descend eventually
     assert vs_ca2[-1] > 0.0  # CAT reverses to climb eventually
+
+
+def test_apply_second_phase_strengthen_weak_uses_reduced_targets():
+    tgo = 20.0
+    dt = 0.5
+    sense_pl = +1
+    sense_cat = +1
+
+    times, vs_pl = vs_time_series(
+        tgo,
+        dt,
+        PL_DELAY_MEAN_S,
+        PL_ACCEL_G,
+        PL_VS_FPM,
+        sense=sense_pl,
+        cap_fpm=PL_VS_CAP_FPM,
+    )
+    _, vs_ca = vs_time_series(tgo, dt, 5.0, 0.18, CAT_INIT_VS_FPM, sense=sense_cat, cap_fpm=CAT_CAP_INIT_FPM)
+
+    times2, _, vs_ca2, t_issue = apply_second_phase(
+        times,
+        vs_pl,
+        vs_ca,
+        tgo,
+        dt,
+        eventtype="STRENGTHEN",
+        sense_pl=sense_pl,
+        sense_cat_exec=sense_cat,
+        pl_vs0=0.0,
+        cat_vs0=0.0,
+        t_classify=10.0,
+        pl_delay=PL_DELAY_MEAN_S,
+        pl_accel_g=PL_ACCEL_G,
+        pl_cap=PL_VS_CAP_FPM,
+        cat_delay=0.9,
+        cat_accel_g=0.35,
+        cat_vs_strength=CAT_STRENGTH_FPM,
+        cat_cap=CAT_CAP_STRENGTH_FPM,
+        decision_latency_s=1.0,
+        cat_mode="weak-compliance",
+    )
+
+    assert t_issue is not None
+
+    idx_issue = int(np.where(np.isclose(times2, t_issue))[0][0])
+    suffix_vs = vs_ca2[idx_issue:]
+    suffix_time = times2[idx_issue]
+    rem = tgo - suffix_time
+    _, expected_vs = vs_time_series(
+        rem,
+        dt,
+        0.9,
+        0.20,
+        1800.0,
+        sense=sense_cat,
+        cap_fpm=2000.0,
+        vs0_fpm=vs_ca2[idx_issue],
+    )
+
+    assert np.allclose(suffix_vs, expected_vs)
 
 
 def test_run_batch_deterministic_seed():

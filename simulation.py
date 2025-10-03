@@ -21,8 +21,8 @@ FT_PER_M = 3.28084
 MS_PER_FPM = 0.00508      # 1 fpm = 0.00508 m/s
 
 # PL (performance-limited) parameters
-PL_DELAY_MEAN_S = 2.2    # adjust if you require 0.9 s globally
-PL_DELAY_SD_S   = 0.4
+PL_DELAY_MEAN_S = 0.9
+PL_DELAY_SD_S   = 0.0
 PL_ACCEL_G      = 0.10
 PL_VS_FPM       = 500.0
 PL_VS_CAP_FPM   = 500.0
@@ -41,11 +41,22 @@ TGO_MAX_S = 35.0
 # ALIM margin for classification conservatism (ft)
 ALIM_MARGIN_FT = 100.0
 
+# Seconds after initial response before reversal monitoring activates
+REVERSAL_EVAL_DELAY_S = 8.0
+
+# Flexible margin for reporting ALIM breaches at CPA (ft)
+ALIM_FLEX_FT = 25.0
+
 
 def sanitize_tgo_bounds(
     tgo_min_s: Optional[float], tgo_max_s: Optional[float]
-) -> Tuple[float, float, float, float]:
-    """Return clipped (lo, hi, mu, sd) for custom t_go windows."""
+) -> Tuple[float, float, float]:
+    """Return clipped (lo, hi, mode) for custom t_go windows.
+
+    The mode is centred on the mid-point of the requested window while being
+    restricted to the regulatory 24–26 s region whenever feasible. This makes it
+    suitable for triangular sampling that still honours the requested bounds.
+    """
 
     lo_raw = TGO_MIN_S if tgo_min_s is None else float(tgo_min_s)
     hi_raw = TGO_MAX_S if tgo_max_s is None else float(tgo_max_s)
@@ -53,9 +64,13 @@ def sanitize_tgo_bounds(
     hi = float(np.clip(hi_raw, TGO_MIN_S, TGO_MAX_S))
     if hi <= lo + 1e-3:
         hi = min(TGO_MAX_S, lo + 1.0)
-    mu = float(np.clip(0.5 * (lo + hi), 24.0, 26.0))
-    sd = max((hi - lo) / 6.0, 0.5)
-    return lo, hi, mu, sd
+
+    midpoint = 0.5 * (lo + hi)
+    preferred = float(np.clip(midpoint, lo + 1e-3, hi - 1e-3))
+    mode = float(np.clip(preferred, 24.0, 26.0))
+    mode = float(np.clip(mode, lo + 1e-3, hi - 1e-3))
+
+    return lo, hi, mode
 
 # ------------------------ Utility functions ------------------------
 
@@ -368,7 +383,7 @@ def apply_non_compliance_to_cat(
             float(np.clip(vs_fpm * rng.uniform(0.55, 0.75), 900.0, 1200.0)),
             float(np.clip(cap_fpm * rng.uniform(0.55, 0.80), 900.0, 1300.0)),
         )
-    compliant_accel = float(np.clip(base_accel_g, 0.20, 0.25))
+    compliant_accel = 0.25
     return ("compliant", sense_cat, base_delay_s, compliant_accel, vs_fpm, cap_fpm)
 
 
@@ -387,7 +402,7 @@ def classify_event(
     sense_chosen_cat: int,
     sense_exec_cat: int,
 ) -> Tuple[str, float, float, float, Optional[str]]:
-    """Return (event_label, minsep, sep@CPA, t_check, reversal_reason)."""
+    """Return (event_label, minsep, sep@CPA, t_detect, reversal_reason)."""
 
     sep = np.abs(z_ca - z_pl)
     minsep = float(np.min(sep))
@@ -395,35 +410,46 @@ def classify_event(
 
     t_pl_move = first_move_time(times, vs_pl)
     t_ca_move = first_move_time(times, vs_ca)
-    t_check = max(t_pl_move, t_ca_move) + 3.0
-    mask = times >= t_check
+    response_start = max(t_pl_move, t_ca_move)
+    eval_start = response_start + REVERSAL_EVAL_DELAY_S
+    eval_threshold = float(np.clip(eval_start, 0.0, times[-1]))
+    mask = times >= eval_threshold
+    if not np.any(mask):
+        mask = np.zeros_like(times, dtype=bool)
+        mask[-1] = True
+
     reversal_reason: Optional[str] = None
+    t_detect = float(times[np.where(mask)[0][-1]])
 
-    if np.any(mask):
-        t_obs = times[mask]
-        sep_obs = sep[mask]
-        rel_rate = (vs_ca - vs_pl) / 60.0
-        rel_obs = rel_rate[mask]
-        s_last = float(sep_obs[-1])
-        r_last = float(rel_obs[-1])
-        t_rem = max(0.0, tgo - t_obs[-1])
-        pred_miss = abs(s_last + r_last * t_rem)
-        approaching = r_last < 0
-        thin_pred = pred_miss < (alim_ft - margin_ft)
-        if approaching and thin_pred:
-            if sense_chosen_cat != sense_exec_cat:
-                reversal_reason = "Opposite sense"
-                return ("REVERSE", minsep, sep_cpa, float(t_obs[-1]), reversal_reason)
-            cat_response_mag = float(np.max(np.abs(vs_ca[mask])))
-            response_delay = t_ca_move - t_pl_move
-            if (cat_response_mag < 0.7 * CAT_INIT_VS_FPM) or (response_delay > 2.0):
-                reversal_reason = "Slow response"
-                return ("REVERSE", minsep, sep_cpa, float(t_obs[-1]), reversal_reason)
+    t_obs = times[mask]
+    sep_obs = sep[mask]
+    rel_rate = (vs_ca - vs_pl) / 60.0
+    rel_obs = rel_rate[mask]
+    s_last = float(sep_obs[-1])
+    r_last = float(rel_obs[-1])
+    t_rem = max(0.0, tgo - t_obs[-1])
+    pred_miss = abs(s_last + r_last * t_rem)
+    approaching = r_last < 0
+    thin_pred = pred_miss < (alim_ft - margin_ft)
 
-    if (minsep < (alim_ft - margin_ft)) or (sep_cpa < (alim_ft - margin_ft)):
-        return ("STRENGTHEN", minsep, sep_cpa, float(t_check), None)
+    if approaching and thin_pred:
+        if sense_chosen_cat != sense_exec_cat:
+            reversal_reason = "Opposite sense"
+            return ("REVERSE", minsep, sep_cpa, t_detect, reversal_reason)
+        cat_response_mag = float(np.max(np.abs(vs_ca[mask])))
+        response_delay = t_ca_move - t_pl_move
+        if (cat_response_mag < 0.7 * CAT_INIT_VS_FPM) or (response_delay > 2.0):
+            reversal_reason = "Slow response"
+            return ("REVERSE", minsep, sep_cpa, t_detect, reversal_reason)
 
-    return ("NONE", minsep, sep_cpa, float(t_check), None)
+    strengthen_threshold = alim_ft - margin_ft
+    breach_mask = np.logical_and(times >= response_start, sep < strengthen_threshold)
+    breach_idx = np.where(breach_mask)[0]
+    if breach_idx.size > 0:
+        t_strengthen = float(times[breach_idx[0]])
+        return ("STRENGTHEN", minsep, sep_cpa, t_strengthen, None)
+
+    return ("NONE", minsep, sep_cpa, t_detect, None)
 
 
 def apply_second_phase(
@@ -441,11 +467,12 @@ def apply_second_phase(
     pl_delay: float = PL_DELAY_MEAN_S,
     pl_accel_g: float = PL_ACCEL_G,
     pl_cap: float = PL_VS_CAP_FPM,
-    cat_delay: float = 1.0,
-    cat_accel_g: float = 0.20,
+    cat_delay: float = 0.9,
+    cat_accel_g: float = 0.35,
     cat_vs_strength: float = CAT_STRENGTH_FPM,
     cat_cap: float = CAT_CAP_STRENGTH_FPM,
     decision_latency_s: float = 1.0,
+    cat_mode: str = "compliant",
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[float]]:
     """Execute STRENGTHEN/REVERSE and continue the kinematics until CPA."""
 
@@ -464,6 +491,26 @@ def apply_second_phase(
     new_sense_pl = sense_pl if eventtype == "STRENGTHEN" else -sense_pl
     new_sense_cat = sense_cat_exec if eventtype == "STRENGTHEN" else -sense_cat_exec
 
+    mode_key = (cat_mode or "").lower().strip()
+    canonical_mode = mode_key.replace(" ", "").replace("/", "")
+    if eventtype == "STRENGTHEN":
+        if canonical_mode in {"compliant", "apfd"}:
+            cat_accel_eff = max(cat_accel_g, 0.35)
+            cat_vs_eff = max(cat_vs_strength, CAT_STRENGTH_FPM)
+            cat_cap_eff = max(cat_cap, CAT_CAP_STRENGTH_FPM)
+        elif "weak" in mode_key:
+            cat_accel_eff = 0.20
+            cat_vs_eff = 1800.0
+            cat_cap_eff = 2000.0
+        else:
+            cat_accel_eff = cat_accel_g
+            cat_vs_eff = cat_vs_strength
+            cat_cap_eff = cat_cap
+    else:
+        cat_accel_eff = cat_accel_g
+        cat_vs_eff = cat_vs_strength
+        cat_cap_eff = cat_cap
+
     t2_rel, vs_pl_cont = vs_time_series(
         t_rem,
         dt,
@@ -478,10 +525,10 @@ def apply_second_phase(
         t_rem,
         dt,
         cat_delay,
-        cat_accel_g,
-        cat_vs_strength,
+        cat_accel_eff,
+        cat_vs_eff,
         sense=new_sense_cat,
-        cap_fpm=cat_cap,
+        cap_fpm=cat_cap_eff,
         vs0_fpm=vs_ca_now,
     )
 
@@ -577,9 +624,9 @@ def run_batch(
         apfd_share_effective = float(np.clip(apfd_share, 0.0, 1.0))
 
     if use_custom_tgo:
-        lo_user, hi_user, mu_user, sd_user = sanitize_tgo_bounds(tgo_min_s, tgo_max_s)
+        lo_user, hi_user, mode_user = sanitize_tgo_bounds(tgo_min_s, tgo_max_s)
     else:
-        lo_user = hi_user = mu_user = sd_user = None
+        lo_user = hi_user = mode_user = None
 
     for k in range(int(runs)):
         FL_PL, FL_CAT, h0 = sample_altitudes_and_h0(rng)
@@ -597,20 +644,18 @@ def run_batch(
             h1, h2 = sample_headings(rng, scenario, 0.0, 360.0, rel_min, rel_max)
         vcl = relative_closure_kt(PL_TAS, h1, CAT_TAS, h2)
         if use_custom_tgo and vcl > 1e-6:
-            lo = lo_user
-            hi = hi_user
-            mu = mu_user
-            sd = sd_user
-            tgo = float(np.clip(rng.normal(mu, sd), lo, hi))
+            lo = float(lo_user)
+            hi = float(hi_user)
+            mode = float(np.clip(mode_user, lo + 1e-3, hi - 1e-3))
+            tgo = float(rng.triangular(lo, mode, hi))
             r0 = (vcl * tgo) / 3600.0
         else:
             r0 = float(rng.uniform(min(r0_min_nm, r0_max_nm), max(r0_min_nm, r0_max_nm)))
             tgo_geom = time_to_go_from_geometry(r0, vcl)
             if use_custom_tgo:
-                lo = lo_user
-                hi = hi_user
-                mu = mu_user
-                sd = sd_user
+                lo = float(lo_user)
+                hi = float(hi_user)
+                mode = float(mode_user)
             else:
                 lo = TGO_MIN_S
                 hi = TGO_MAX_S
@@ -622,10 +667,17 @@ def run_batch(
                     mu, sd = 30.0, 8.0
             if tgo_geom is not None:
                 hi = min(hi, tgo_geom)
-            hi = float(np.clip(hi, lo + 0.5, TGO_MAX_S))
-            if hi <= lo + 1e-3:
-                hi = min(TGO_MAX_S, lo + 1.0)
-            tgo = float(np.clip(rng.normal(mu, sd), lo, hi))
+            if use_custom_tgo:
+                hi = float(np.clip(hi, lo + 1e-3, TGO_MAX_S))
+                if hi <= lo + 1e-3:
+                    hi = min(TGO_MAX_S, lo + 1.0)
+                mode = float(np.clip(mode, lo + 1e-3, hi - 1e-3))
+                tgo = float(rng.triangular(lo, mode, hi))
+            else:
+                hi = float(np.clip(hi, lo + 0.5, TGO_MAX_S))
+                if hi <= lo + 1e-3:
+                    hi = min(TGO_MAX_S, lo + 1.0)
+                tgo = float(np.clip(rng.normal(mu, sd), lo, hi))
             if use_custom_tgo and vcl <= 1e-6:
                 # Degenerate geometry; retain user-specified range settings.
                 r0 = float(rng.uniform(min(r0_min_nm, r0_max_nm), max(r0_min_nm, r0_max_nm)))
@@ -647,24 +699,22 @@ def run_batch(
             cat_cap=CAT_CAP_INIT_FPM,
         )
 
+        cat_delay_eff = float(np.clip(rng.normal(5.0, 1.5), 2.5, 8.0))
         if use_delay_mixture:
-            fast_share = rng.uniform(0.60, 0.70)
-            if rng.uniform() < fast_share:
-                cat_delay_eff = float(rng.uniform(4.0, 5.0))
-                cat_accel_eff = float(rng.uniform(0.20, 0.25))
-            else:
-                cat_delay_eff = float(rng.uniform(8.0, 10.0))
-                cat_accel_eff = float(rng.uniform(0.12, 0.18))
+            cat_accel_eff = float(np.clip(rng.normal(0.24, 0.02), 0.18, 0.28))
         else:
-            cat_delay_eff = 5.0
-            cat_accel_eff = 0.22
+            cat_accel_eff = float(np.clip(rng.normal(0.25, 0.01), 0.22, 0.28))
 
         is_apfd = rng.uniform() < apfd_share_effective
-        cat_is_apfd = bool(is_apfd and apfd_mode_key != "custom")
-        if apfd_mode_key == "custom":
-            if is_apfd:
-                cat_delay_eff = max(0.0, cat_delay_eff - 0.8)
-                cat_accel_eff = float(np.clip(cat_accel_eff + 0.03, 0.20, 0.25))
+        cat_is_apfd = bool(is_apfd)
+        if is_apfd:
+            mode = "AP/FD"
+            sense_cat_exec = sense_ca
+            cat_delay_exec = 0.9
+            cat_accel_exec = 0.25
+            cat_vs_exec = CAT_INIT_VS_FPM
+            cat_cap_exec = CAT_CAP_INIT_FPM
+        else:
             (
                 mode,
                 sense_cat_exec,
@@ -684,34 +734,6 @@ def run_batch(
                 p_weak=p_weak,
                 jitter=jitter_priors,
             )
-        else:
-            if is_apfd:
-                mode = "AP/FD"
-                sense_cat_exec = sense_ca
-                cat_delay_exec = 1.25
-                cat_accel_exec = 0.20
-                cat_vs_exec = CAT_INIT_VS_FPM
-                cat_cap_exec = CAT_CAP_INIT_FPM
-            else:
-                (
-                    mode,
-                    sense_cat_exec,
-                    cat_delay_exec,
-                    cat_accel_exec,
-                    cat_vs_exec,
-                    cat_cap_exec,
-                ) = apply_non_compliance_to_cat(
-                    rng,
-                    sense_ca,
-                    base_delay_s=cat_delay_eff,
-                    base_accel_g=cat_accel_eff,
-                    vs_fpm=CAT_INIT_VS_FPM,
-                    cap_fpm=CAT_CAP_INIT_FPM,
-                    p_opp=p_opp,
-                    p_taonly=p_ta,
-                    p_weak=p_weak,
-                    jitter=jitter_priors,
-                )
 
         pl_delay = max(0.0, rng.normal(PL_DELAY_MEAN_S, PL_DELAY_SD_S))
 
@@ -740,7 +762,7 @@ def run_batch(
 
         alim_ft = alim_ft_from_alt(FL_PL * 100.0, override_ft=alim_override_ft)
 
-        eventtype, minsep_ft, sep_cpa_ft, t_check, reversal_reason = classify_event(
+        eventtype, minsep_ft, sep_cpa_ft, t_detect, reversal_reason = classify_event(
             times,
             z_pl,
             z_ca,
@@ -753,7 +775,9 @@ def run_batch(
             sense_exec_cat=sense_cat_exec,
         )
 
+        tau_detect_s = max(0.0, tgo - t_detect)
         t2_issue = None
+        tau_second_issue_s: Optional[float] = None
         if eventtype in ("STRENGTHEN", "REVERSE"):
             times2, vs_pl2, vs_ca2, t2_issue = apply_second_phase(
                 times,
@@ -766,17 +790,19 @@ def run_batch(
                 sense_cat_exec,
                 pl_vs0=vz0_pl,
                 cat_vs0=vz0_cat,
-                t_classify=t_check,
+                t_classify=t_detect,
                 pl_delay=pl_delay,
                 pl_accel_g=PL_ACCEL_G,
                 pl_cap=PL_VS_CAP_FPM,
-                cat_delay=1.0,
-                cat_accel_g=0.20,
+                cat_delay=0.9,
+                cat_accel_g=0.35,
                 cat_vs_strength=CAT_STRENGTH_FPM,
                 cat_cap=CAT_CAP_STRENGTH_FPM,
                 decision_latency_s=float(np.clip(rng.normal(1.0, 0.2), 0.6, 1.4)),
+                cat_mode=mode,
             )
             if t2_issue is not None:
+                tau_second_issue_s = max(0.0, tgo - t2_issue)
                 z_pl2 = integrate_altitude_from_vs(times2, vs_pl2, 0.0)
                 z_ca2 = integrate_altitude_from_vs(times2, vs_ca2, h0 if cat_above else -h0)
                 sep2 = np.abs(z_ca2 - z_pl2)
@@ -787,17 +813,11 @@ def run_batch(
         sep_trace = np.abs(z_ca - z_pl)
         miss_cpa_ft = float(abs(z_ca[-1] - z_pl[-1]))
         margin_trace = sep_trace - alim_ft
-        cpa_time = float(times[-1])
-        window_mask = np.abs(times - cpa_time) <= 1.0
-        if not np.any(window_mask):
-            window_mask[-1] = True
-        outside_mask = ~window_mask
-        sep_window_min_ft = float(np.min(sep_trace[window_mask]))
-        alim_breach_cpa = bool(sep_trace[-1] < alim_ft)
-        alim_breach_cpa_window = bool(np.any(sep_trace[window_mask] < alim_ft))
-        alim_breach_margin = alim_breach_cpa_window
-        alim_breach_outside = bool(np.any(sep_trace[outside_mask] < alim_ft)) if np.any(outside_mask) else False
         margin_min_ft = float(np.min(margin_trace))
+        margin_cpa_ft = float(sep_trace[-1] - alim_ft)
+        alim_breach_cpa = bool(sep_trace[-1] < alim_ft)
+        flex_threshold = max(0.0, alim_ft - ALIM_FLEX_FT)
+        alim_breach_cpa_flex = bool(sep_trace[-1] < flex_threshold)
 
         delta_pl = float(z_pl[-1] - z_pl[0])
         delta_cat = float(z_ca[-1] - z_ca[0])
@@ -840,15 +860,16 @@ def run_batch(
                 missCPAft=miss_cpa_ft,
                 minsepft=minsep_ft,
                 sep_cpa_ft=sep_cpa_ft,
-                sep_window_min_ft=sep_window_min_ft,
                 margin_min_ft=margin_min_ft,
+                margin_cpa_ft=margin_cpa_ft,
                 alim_breach_cpa=alim_breach_cpa,
-                alim_breach_cpa_window=alim_breach_cpa_window,
-                alim_breach_margin=alim_breach_margin,
-                alim_breach_outside=alim_breach_outside,
+                alim_breach_cpa_excl25=alim_breach_cpa_flex,
                 eventtype=eventtype,
                 reverse_reason=reversal_reason,
+                t_detect=t_detect,
+                tau_detect=tau_detect_s,
                 t_second_issue=t2_issue,
+                tau_second_issue=tau_second_issue_s,
                 comp_label=comp_label,
                 CAT_is_APFD=int(cat_is_apfd),
                 residual_risk=residual_risk,
@@ -878,6 +899,8 @@ __all__ = [
     "TGO_MIN_S",
     "TGO_MAX_S",
     "ALIM_MARGIN_FT",
+    "REVERSAL_EVAL_DELAY_S",
+    "ALIM_FLEX_FT",
     "ALIM_BANDS_FT",
     # helpers
     "ias_to_tas",
