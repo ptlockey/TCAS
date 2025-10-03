@@ -16,6 +16,7 @@ Implements the requested amendments on top of your functioning codebase:
 from __future__ import annotations
 
 import io
+from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -36,6 +37,7 @@ from simulation import (
     ias_to_tas,
     integrate_altitude_from_vs,
     run_batch,
+    sanitize_tgo_bounds,
     time_to_go_from_geometry,
     vs_time_series,
 )
@@ -45,6 +47,30 @@ ALIM_CHOICES = [
     ("FL100–FL200 (400 ft)", 400.0),
     ("FL200–FL420 (600 ft)", 600.0),
 ]
+
+APFD_DEFAULT_MODE = "custom"
+APFD_DEFAULT_SHARE = 0.35
+APFD_CUSTOM_SHARE_KEY = "apfd_custom_share"
+APFD_OPTION_KEY = "apfd_option"
+APFD_PRESET_MAP = {
+    "Mixed global traffic (10%)": ("mixed", 0.10),
+    "Airbus-centric (30%)": ("airbus", 0.30),
+}
+
+
+def sanitize_apfd_config(option: str, share_value: Optional[float]) -> Tuple[str, float]:
+    """Return a valid AP/FD mode string and share bounded to [0, 1]."""
+
+    if option in APFD_PRESET_MAP:
+        return APFD_PRESET_MAP[option]
+
+    # Default to the custom selection when the option is unrecognised.
+    try:
+        share = float(share_value if share_value is not None else APFD_DEFAULT_SHARE)
+    except (TypeError, ValueError):
+        share = APFD_DEFAULT_SHARE
+    share = float(np.clip(share, 0.0, 1.0))
+    return APFD_DEFAULT_MODE, share
 
 # ------------------------------- Streamlit UI -------------------------------
 
@@ -97,8 +123,13 @@ with st.sidebar:
                 step=0.5,
                 help="Minimum and maximum t_go bounds used when sampling encounters. The implied mean is clamped to 24–26 s."
             )
+            tgo_window = sanitize_tgo_bounds(tgo_minmax[0], tgo_minmax[1])
+            st.caption(
+                "When enabled the single-run demo and batch sampler use the selected t_go window instead of the range inputs."
+            )
         else:
             tgo_minmax = (None, None)
+            tgo_window = None
         if scenario == "Custom":
             hdg1_min = st.number_input("PL heading min (deg)", value=0.0, step=5.0,
                                        help="Minimum heading for the protected aircraft when sampling custom runs.")
@@ -128,6 +159,9 @@ with st.sidebar:
             value=True,
             help="Randomly perturb the prior probabilities each batch to reflect modelling uncertainty."
         )
+        if APFD_CUSTOM_SHARE_KEY not in st.session_state:
+            st.session_state[APFD_CUSTOM_SHARE_KEY] = APFD_DEFAULT_SHARE
+
         apfd_option = st.selectbox(
             "AP/FD configuration",
             [
@@ -135,26 +169,31 @@ with st.sidebar:
                 "Mixed global traffic (10%)",
                 "Airbus-centric (30%)",
             ],
+            key=APFD_OPTION_KEY,
             help="Choose how autopilot/flight-director usage is represented in the Monte Carlo runs."
         )
+
+        apfd_raw_share = st.session_state.get(APFD_CUSTOM_SHARE_KEY, APFD_DEFAULT_SHARE)
+
         if apfd_option == "Custom share":
-            apfd_mode = "custom"
-            apfd_share = st.slider(
+            apfd_raw_share = st.slider(
                 "AP/FD share",
                 0.0,
                 1.0,
-                0.35,
-                0.05,
+                value=float(apfd_raw_share),
+                step=0.05,
+                key=APFD_CUSTOM_SHARE_KEY,
                 help="Share of crews flying via AP/FD, which lowers delay and slightly boosts acceleration."
             )
-        elif apfd_option.startswith("Mixed"):
-            apfd_mode = "mixed"
-            apfd_share = 0.10
-            st.caption("Mixed global traffic fixes AP/FD usage at 10% with deterministic CAT kinematics for that share.")
-        else:
-            apfd_mode = "airbus"
-            apfd_share = 0.30
-            st.caption("Airbus-centric traffic fixes AP/FD usage at 30% with deterministic CAT kinematics for that share.")
+        elif apfd_option in APFD_PRESET_MAP:
+            preset_mode, _ = APFD_PRESET_MAP[apfd_option]
+            if preset_mode == "mixed":
+                st.caption("Mixed global traffic fixes AP/FD usage at 10% with deterministic CAT kinematics for that share.")
+            elif preset_mode == "airbus":
+                st.caption("Airbus-centric traffic fixes AP/FD usage at 30% with deterministic CAT kinematics for that share.")
+
+        apfd_mode, apfd_share = sanitize_apfd_config(apfd_option, apfd_raw_share)
+        apfd_share_sanitized = float(apfd_share)
         st.markdown("**Non-compliance priors** (updated baseline)")
         p_opp = st.number_input(
             "P(opposite-sense)",
@@ -226,7 +265,12 @@ with tabs[0]:
         cat_tas = ias_to_tas(float(cat_ias_user), single_alt_ft)
         closure_kt = pl_tas + cat_tas
 
-        t_cpa = time_to_go_from_geometry(float(initial_range_nm), closure_kt)
+        initial_range_effective = float(initial_range_nm)
+        if use_custom_tgo and tgo_window is not None and closure_kt > 1e-6:
+            t_cpa = float(np.clip(tgo_window[2], tgo_window[0], tgo_window[1]))
+            initial_range_effective = (closure_kt * t_cpa) / 3600.0
+        else:
+            t_cpa = time_to_go_from_geometry(initial_range_effective, closure_kt)
 
         if t_cpa is None:
             st.warning("Closure rate is zero or negative; CPA cannot be determined.")
@@ -267,7 +311,7 @@ with tabs[0]:
 
             st.markdown(
                 f"**Scenario**: Head-on at FL{SINGLE_FL}, PL IAS {PL_IAS_KT:.0f} kt (TAS {pl_tas:.1f} kt), "
-                f"CAT IAS {cat_ias_user:.0f} kt (TAS {cat_tas:.1f} kt)."
+                f"CAT IAS {cat_ias_user:.0f} kt (TAS {cat_tas:.1f} kt), initial range {initial_range_effective:.2f} NM."
             )
 
             c_metric1, c_metric2, c_metric3, c_metric4 = st.columns(4)
@@ -300,7 +344,7 @@ with tabs[1]:
             r0_min_nm=float(r0_min), r0_max_nm=float(r0_max),
             aggressiveness=float(aggressiveness),
             p_opp=float(p_opp), p_ta=float(p_ta), p_weak=float(p_weak),
-            jitter_priors=bool(jitter), apfd_share=float(apfd_share),
+            jitter_priors=bool(jitter), apfd_share=apfd_share_sanitized,
             use_delay_mixture=True,
             dt=0.1,
             hdg1_min=float(hdg1_min), hdg1_max=float(hdg1_max),
@@ -321,7 +365,10 @@ with tabs[1]:
         report_alim_outside = st.checkbox(
             "Report ALIM @ CPA outside ±1 s window",
             value=False,
-            help="When enabled the displayed ALIM@CPA metric ignores breaches occurring within ±1 s of CPA."
+            help=(
+                "When enabled the CPA metric uses the minimum separation within ±1 s of CPA; a companion metric highlights"
+                " breaches that only occur outside that window."
+            ),
         )
         total_runs = len(df)
         safe_total = max(total_runs, 1)
@@ -330,22 +377,28 @@ with tabs[1]:
         p_str = (df['eventtype'] == "STRENGTHEN").sum() / safe_total
         p_none = (df['eventtype'] == "NONE").sum() / safe_total
         p_alim_any = (df['margin_min_ft'] < 0.0).sum() / safe_total
-        p_alim_cpa = df['alim_breach_cpa'].sum() / safe_total
-        p_alim_margin = df['alim_breach_margin'].sum() / safe_total
+        sep_reference = df['sep_cpa_ft']
+        alim_cpa_series = df['alim_breach_cpa']
+        if report_alim_outside:
+            sep_reference = df.get('sep_window_min_ft', sep_reference)
+            alim_cpa_series = df.get('alim_breach_cpa_window', df['alim_breach_margin'])
+        p_alim_cpa = alim_cpa_series.sum() / safe_total
+        p_alim_window = df['alim_breach_margin'].sum() / safe_total
         p_alim_outside = df['alim_breach_outside'].sum() / safe_total
         c1.metric("P(Reversal)", f"{100 * p_rev:,.2f}%")
         c2.metric("P(Strengthen)", f"{100 * p_str:,.2f}%")
         c3.metric("P(None)", f"{100 * p_none:,.2f}%")
         c4.metric("P(ALIM Any)", f"{100 * p_alim_any:,.2f}%")
         if report_alim_outside:
-            c5.metric("P(ALIM @ CPA outside ±1 s)", f"{100 * p_alim_outside:,.2f}%")
+            c5.metric("P(ALIM @ CPA (±1 s window))", f"{100 * p_alim_cpa:,.2f}%")
+            c6.metric("P(ALIM outside ±1 s)", f"{100 * p_alim_outside:,.2f}%")
         else:
             c5.metric("P(ALIM @ CPA)", f"{100 * p_alim_cpa:,.2f}%")
-        c6.metric("P(ALIM within ±1 s)", f"{100 * p_alim_margin:,.2f}%")
-        st.caption("Percentages describe RA outcomes alongside ALIM breaches at CPA, within ±1 s, and anywhere in the run.")
-        near_25 = (df['sep_cpa_ft'] - df['ALIM_ft']).abs() <= 25.0
-        near_50 = (df['sep_cpa_ft'] - df['ALIM_ft']).abs() <= 50.0
-        near_100 = (df['sep_cpa_ft'] - df['ALIM_ft']).abs() <= 100.0
+            c6.metric("P(ALIM within ±1 s)", f"{100 * p_alim_window:,.2f}%")
+        st.caption("Percentages describe RA outcomes alongside ALIM breaches at CPA, respecting the selected ±1 s window option, and anywhere in the run.")
+        near_25 = (sep_reference - df['ALIM_ft']).abs() <= 25.0
+        near_50 = (sep_reference - df['ALIM_ft']).abs() <= 50.0
+        near_100 = (sep_reference - df['ALIM_ft']).abs() <= 100.0
         near_25_rate = near_25.sum() / safe_total
         near_50_rate = near_50.sum() / safe_total
         near_100_rate = near_100.sum() / safe_total
@@ -418,7 +471,7 @@ with tabs[1]:
             "Left: outcome mix across the batch. Right: how initial vertical separation trends with reversal/strengthen events."
         )
 
-        margin = df['sep_cpa_ft'] - df['ALIM_ft']
+        margin = sep_reference - df['ALIM_ft']
         breach_mask = margin < 0.0
         fig2, ax2 = plt.subplots(figsize=(8, 5))
 
@@ -443,7 +496,7 @@ with tabs[1]:
                 edgecolors='#000000',
                 s=60,
                 linewidths=0.8,
-                label='ALIM breach @ CPA',
+                label='ALIM breach (selected CPA metric)',
             )
 
         ax2.axhline(0.0, color='k', linestyle='--', linewidth=1, alpha=0.7)
