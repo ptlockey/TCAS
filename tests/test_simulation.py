@@ -15,7 +15,10 @@ from simulation import (
     PL_DELAY_MEAN_S,
     PL_VS_CAP_FPM,
     PL_VS_FPM,
+    REVERSAL_GUARD_TGO_S,
     apply_second_phase,
+    classify_event,
+    integrate_altitude_from_vs,
     ias_to_tas,
     run_batch,
     vs_time_series,
@@ -132,6 +135,149 @@ def test_apply_second_phase_strengthen_weak_uses_reduced_targets():
     )
 
     assert np.allclose(suffix_vs, expected_vs)
+
+
+def test_classify_event_reversal_guard_uses_time_to_go():
+    times = np.arange(0.0, 21.0, 1.0)
+    sep0 = 1000.0
+    closure_fps = 50.0
+
+    z_pl = np.zeros_like(times)
+    z_ca = sep0 - closure_fps * times
+    vs_pl = np.zeros_like(times)
+    vs_ca = np.full_like(times, -closure_fps * 60.0)
+
+    eventtype, _, _, t_detect, reversal_reason = classify_event(
+        times=times,
+        z_pl=z_pl,
+        z_ca=z_ca,
+        vs_pl=vs_pl,
+        vs_ca=vs_ca,
+        tgo=20.0,
+        alim_ft=400.0,
+        margin_ft=100.0,
+        sense_chosen_cat=+1,
+        sense_exec_cat=-1,
+    )
+
+    assert eventtype == "REVERSE"
+    assert reversal_reason == "Opposite sense"
+    assert np.isclose(t_detect, 20.0 - REVERSAL_GUARD_TGO_S)
+
+
+def test_classify_event_standard_cat_delay_is_not_reversal_trigger():
+    tgo = 20.0
+    dt = 1.0
+
+    times = np.arange(0.0, tgo + 1e-9, dt)
+    _, vs_pl = vs_time_series(
+        tgo,
+        dt,
+        PL_DELAY_MEAN_S,
+        PL_ACCEL_G,
+        PL_VS_FPM,
+        sense=+1,
+        cap_fpm=PL_VS_CAP_FPM,
+    )
+    _, vs_ca = vs_time_series(
+        tgo,
+        dt,
+        5.0,
+        0.25,
+        CAT_INIT_VS_FPM,
+        sense=-1,
+        cap_fpm=CAT_CAP_INIT_FPM,
+    )
+
+    z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
+    z_ca = integrate_altitude_from_vs(times, vs_ca, 750.0)
+
+    eventtype, _, _, _, reversal_reason = classify_event(
+        times=times,
+        z_pl=z_pl,
+        z_ca=z_ca,
+        vs_pl=vs_pl,
+        vs_ca=vs_ca,
+        tgo=tgo,
+        alim_ft=400.0,
+        margin_ft=100.0,
+        sense_chosen_cat=-1,
+        sense_exec_cat=-1,
+    )
+
+    assert eventtype == "NONE"
+    assert reversal_reason is None
+
+
+def test_classify_event_strengthen_fires_on_predicted_miss_when_time_allows():
+    tgo = 25.0
+    dt = 1.0
+
+    times = np.arange(0.0, tgo + 1e-9, dt)
+    vs_pl = np.zeros_like(times)
+    vs_ca = np.zeros_like(times)
+
+    for idx, t_now in enumerate(times):
+        if t_now < 3.0:
+            vs_ca[idx] = -200.0
+        elif t_now < 8.0:
+            vs_ca[idx] = -200.0 - 200.0 * (t_now - 3.0)
+        else:
+            vs_ca[idx] = -1200.0
+
+    z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
+    z_ca = integrate_altitude_from_vs(times, vs_ca, 900.0)
+
+    eventtype, _, _, t_detect, _ = classify_event(
+        times=times,
+        z_pl=z_pl,
+        z_ca=z_ca,
+        vs_pl=vs_pl,
+        vs_ca=vs_ca,
+        tgo=tgo,
+        alim_ft=400.0,
+        margin_ft=100.0,
+        sense_chosen_cat=+1,
+        sense_exec_cat=+1,
+    )
+
+    assert eventtype == "STRENGTHEN"
+    assert np.isclose(t_detect, 7.0)
+
+
+def test_classify_event_strengthen_suppressed_when_time_short():
+    tgo = 15.0
+    dt = 1.0
+
+    times = np.arange(0.0, tgo + 1e-9, dt)
+    vs_pl = np.zeros_like(times)
+    vs_ca = np.zeros_like(times)
+
+    for idx, t_now in enumerate(times):
+        if t_now < 3.0:
+            vs_ca[idx] = -200.0
+        elif t_now < 8.0:
+            vs_ca[idx] = -200.0 - 200.0 * (t_now - 3.0)
+        else:
+            vs_ca[idx] = -1200.0
+
+    z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
+    z_ca = integrate_altitude_from_vs(times, vs_ca, 900.0)
+
+    eventtype, _, _, _, _ = classify_event(
+        times=times,
+        z_pl=z_pl,
+        z_ca=z_ca,
+        vs_pl=vs_pl,
+        vs_ca=vs_ca,
+        tgo=tgo,
+        alim_ft=400.0,
+        margin_ft=100.0,
+        sense_chosen_cat=+1,
+        sense_exec_cat=+1,
+    )
+
+    assert eventtype != "STRENGTHEN"
 
 
 def test_run_batch_deterministic_seed():
