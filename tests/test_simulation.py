@@ -65,7 +65,7 @@ def test_vs_time_series_post_delay_slope_matches_commanded_accel():
         assert np.allclose(slopes, sense * expected_slope, atol=1e-6)
 
 
-def test_apply_second_phase_reverse_keeps_pl_profile():
+def test_apply_second_phase_reverse_flips_senses_and_profiles():
     tgo = 20.0
     dt = 0.5
     sense_pl = +1
@@ -82,7 +82,15 @@ def test_apply_second_phase_reverse_keeps_pl_profile():
     )
     _, vs_ca = vs_time_series(tgo, dt, 4.0, 0.20, CAT_INIT_VS_FPM, sense=sense_cat, cap_fpm=CAT_CAP_INIT_FPM)
 
-    times2, vs_pl2, vs_ca2, t_issue = apply_second_phase(
+    (
+        times2,
+        vs_pl2,
+        vs_ca2,
+        t_issue,
+        new_sense_pl,
+        new_sense_cat_exec,
+        new_sense_cat_cmd,
+    ) = apply_second_phase(
         times,
         vs_pl,
         vs_ca,
@@ -91,6 +99,7 @@ def test_apply_second_phase_reverse_keeps_pl_profile():
         eventtype="REVERSE",
         sense_pl=sense_pl,
         sense_cat_exec=sense_cat,
+        sense_cat_cmd=sense_cat,
         pl_vs0=0.0,
         cat_vs0=0.0,
         t_classify=8.0,
@@ -106,15 +115,92 @@ def test_apply_second_phase_reverse_keeps_pl_profile():
 
     assert t_issue is not None
 
-    interpolated_pl = np.interp(times2, times, vs_pl)
-    assert np.allclose(vs_pl2, interpolated_pl)
+    assert new_sense_pl == -sense_pl
+    assert new_sense_cat_exec == -sense_cat
+    assert new_sense_cat_cmd == -sense_cat
 
-    z_pl_orig = integrate_altitude_from_vs(times, vs_pl, 0.0)
+    prefix_mask = times2 <= t_issue + 1e-9
+    assert np.allclose(vs_pl2[prefix_mask], np.interp(times2[prefix_mask], times, vs_pl))
+    assert np.allclose(vs_ca2[prefix_mask], np.interp(times2[prefix_mask], times, vs_ca))
+
+    idx_issue = int(np.where(np.isclose(times2, t_issue))[0][0])
+    assert vs_pl2[idx_issue] > 0.0
+    assert np.any(vs_pl2[idx_issue:] < 0.0)
+    assert vs_pl2[-1] < 0.0
+    assert vs_ca2[-1] > 0.0
+
+
+def test_apply_second_phase_reverse_improves_predicted_miss():
+    tgo = 20.0
+    dt = 0.5
+    sense_pl = +1
+    sense_cat = -1
+    h0 = 800.0
+
+    times, vs_pl = vs_time_series(
+        tgo,
+        dt,
+        PL_DELAY_MEAN_S,
+        PL_ACCEL_G,
+        PL_VS_FPM,
+        sense=sense_pl,
+        cap_fpm=PL_VS_CAP_FPM,
+    )
+    _, vs_ca = vs_time_series(
+        tgo,
+        dt,
+        4.0,
+        0.20,
+        CAT_INIT_VS_FPM,
+        sense=sense_cat,
+        cap_fpm=CAT_CAP_INIT_FPM,
+    )
+
+    z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
+    z_ca = integrate_altitude_from_vs(times, vs_ca, h0)
+    miss_before = abs(z_ca[-1] - z_pl[-1])
+
+    (
+        times2,
+        vs_pl2,
+        vs_ca2,
+        t_issue,
+        new_sense_pl,
+        new_sense_cat_exec,
+        new_sense_cat_cmd,
+    ) = apply_second_phase(
+        times,
+        vs_pl,
+        vs_ca,
+        tgo,
+        dt,
+        eventtype="REVERSE",
+        sense_pl=sense_pl,
+        sense_cat_exec=sense_cat,
+        sense_cat_cmd=sense_cat,
+        pl_vs0=0.0,
+        cat_vs0=0.0,
+        t_classify=8.0,
+        pl_delay=PL_DELAY_MEAN_S,
+        pl_accel_g=PL_ACCEL_G,
+        pl_cap=PL_VS_CAP_FPM,
+        cat_delay=0.9,
+        cat_accel_g=0.35,
+        cat_vs_strength=CAT_STRENGTH_FPM,
+        cat_cap=CAT_CAP_STRENGTH_FPM,
+        decision_latency_s=1.0,
+    )
+
+    assert t_issue is not None
+    assert new_sense_pl == -sense_pl
+    assert new_sense_cat_exec == -sense_cat
+    assert new_sense_cat_cmd == -sense_cat
+
     z_pl2 = integrate_altitude_from_vs(times2, vs_pl2, 0.0)
-    interpolated_z = np.interp(times2, times, z_pl_orig)
-    assert np.allclose(z_pl2, interpolated_z)
-    assert vs_pl2[-1] > 0.0  # PL continues original climb sense
-    assert vs_ca2[-1] > 0.0  # CAT reverses to climb eventually
+    z_ca2 = integrate_altitude_from_vs(times2, vs_ca2, h0)
+    miss_after = abs(z_ca2[-1] - z_pl2[-1])
+
+    assert miss_after > miss_before
 
 
 def test_apply_second_phase_strengthen_weak_meets_nominal_targets():
@@ -134,7 +220,15 @@ def test_apply_second_phase_strengthen_weak_meets_nominal_targets():
     )
     _, vs_ca = vs_time_series(tgo, dt, 5.0, 0.18, CAT_INIT_VS_FPM, sense=sense_cat, cap_fpm=CAT_CAP_INIT_FPM)
 
-    times2, _, vs_ca2, t_issue = apply_second_phase(
+    (
+        times2,
+        _,
+        vs_ca2,
+        t_issue,
+        new_sense_pl,
+        new_sense_cat_exec,
+        new_sense_cat_cmd,
+    ) = apply_second_phase(
         times,
         vs_pl,
         vs_ca,
@@ -143,6 +237,7 @@ def test_apply_second_phase_strengthen_weak_meets_nominal_targets():
         eventtype="STRENGTHEN",
         sense_pl=sense_pl,
         sense_cat_exec=sense_cat,
+        sense_cat_cmd=sense_cat,
         pl_vs0=0.0,
         cat_vs0=0.0,
         t_classify=10.0,
@@ -158,6 +253,9 @@ def test_apply_second_phase_strengthen_weak_meets_nominal_targets():
     )
 
     assert t_issue is not None
+    assert new_sense_pl == sense_pl
+    assert new_sense_cat_exec == sense_cat
+    assert new_sense_cat_cmd == sense_cat
 
     idx_issue = int(np.where(np.isclose(times2, t_issue))[0][0])
     suffix_vs = vs_ca2[idx_issue:]
@@ -194,7 +292,15 @@ def test_apply_second_phase_force_exigent_strengthen_uses_exigent_profile():
     )
     _, vs_ca = vs_time_series(tgo, dt, 5.0, 0.18, CAT_INIT_VS_FPM, sense=sense_cat, cap_fpm=CAT_CAP_INIT_FPM)
 
-    times2, _, vs_ca2, t_issue = apply_second_phase(
+    (
+        times2,
+        _,
+        vs_ca2,
+        t_issue,
+        new_sense_pl,
+        new_sense_cat_exec,
+        new_sense_cat_cmd,
+    ) = apply_second_phase(
         times,
         vs_pl,
         vs_ca,
@@ -203,6 +309,7 @@ def test_apply_second_phase_force_exigent_strengthen_uses_exigent_profile():
         eventtype="STRENGTHEN",
         sense_pl=sense_pl,
         sense_cat_exec=sense_cat,
+        sense_cat_cmd=sense_cat,
         pl_vs0=0.0,
         cat_vs0=0.0,
         t_classify=7.0,
@@ -219,6 +326,9 @@ def test_apply_second_phase_force_exigent_strengthen_uses_exigent_profile():
     )
 
     assert t_issue is not None
+    assert new_sense_pl == sense_pl
+    assert new_sense_cat_exec == sense_cat
+    assert new_sense_cat_cmd == sense_cat
 
     idx_issue = int(np.where(np.isclose(times2, t_issue))[0][0])
     suffix_vs = vs_ca2[idx_issue:]
