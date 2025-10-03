@@ -21,8 +21,8 @@ FT_PER_M = 3.28084
 MS_PER_FPM = 0.00508      # 1 fpm = 0.00508 m/s
 
 # PL (performance-limited) parameters
-PL_DELAY_MEAN_S = 2.2    # adjust if you require 0.9 s globally
-PL_DELAY_SD_S   = 0.4
+PL_DELAY_MEAN_S = 0.9
+PL_DELAY_SD_S   = 0.0
 PL_ACCEL_G      = 0.10
 PL_VS_FPM       = 500.0
 PL_VS_CAP_FPM   = 500.0
@@ -40,6 +40,22 @@ TGO_MAX_S = 35.0
 
 # ALIM margin for classification conservatism (ft)
 ALIM_MARGIN_FT = 100.0
+
+
+def sanitize_tgo_bounds(
+    tgo_min_s: Optional[float], tgo_max_s: Optional[float]
+) -> Tuple[float, float, float, float]:
+    """Return (lo, hi, mode, spread) for custom t_go windows."""
+
+    lo_raw = TGO_MIN_S if tgo_min_s is None else float(tgo_min_s)
+    hi_raw = TGO_MAX_S if tgo_max_s is None else float(tgo_max_s)
+    lo = float(np.clip(lo_raw, TGO_MIN_S, TGO_MAX_S))
+    hi = float(np.clip(hi_raw, TGO_MIN_S, TGO_MAX_S))
+    if hi <= lo + 1e-3:
+        hi = min(TGO_MAX_S, lo + 1.0)
+    mode = float(0.5 * (lo + hi))
+    spread = max(hi - lo, 0.5)
+    return lo, hi, mode, spread
 
 # ------------------------ Utility functions ------------------------
 
@@ -426,7 +442,7 @@ def apply_second_phase(
     pl_accel_g: float = PL_ACCEL_G,
     pl_cap: float = PL_VS_CAP_FPM,
     cat_delay: float = 1.0,
-    cat_accel_g: float = 0.20,
+    cat_accel_g: float = 0.35,
     cat_vs_strength: float = CAT_STRENGTH_FPM,
     cat_cap: float = CAT_CAP_STRENGTH_FPM,
     decision_latency_s: float = 1.0,
@@ -560,6 +576,11 @@ def run_batch(
         apfd_mode_key = "custom"
         apfd_share_effective = float(np.clip(apfd_share, 0.0, 1.0))
 
+    if use_custom_tgo:
+        lo_user, hi_user, mode_user, _ = sanitize_tgo_bounds(tgo_min_s, tgo_max_s)
+    else:
+        lo_user = hi_user = mode_user = None
+
     for k in range(int(runs)):
         FL_PL, FL_CAT, h0 = sample_altitudes_and_h0(rng)
         cat_above = (FL_CAT > FL_PL) if (FL_CAT != FL_PL) else (rng.uniform() < 0.5)
@@ -574,34 +595,41 @@ def run_batch(
             h2 = float(rng.uniform(hdg2_min, hdg2_max))
         else:
             h1, h2 = sample_headings(rng, scenario, 0.0, 360.0, rel_min, rel_max)
-        r0 = float(rng.uniform(min(r0_min_nm, r0_max_nm), max(r0_min_nm, r0_max_nm)))
         vcl = relative_closure_kt(PL_TAS, h1, CAT_TAS, h2)
-        tgo_geom = time_to_go_from_geometry(r0, vcl)
-
-        if use_custom_tgo:
-            lo_user = float(np.clip(tgo_min_s if tgo_min_s is not None else TGO_MIN_S, TGO_MIN_S, TGO_MAX_S))
-            hi_user = float(np.clip(tgo_max_s if tgo_max_s is not None else TGO_MAX_S, TGO_MIN_S, TGO_MAX_S))
-            if hi_user <= lo_user + 1e-3:
-                hi_user = min(TGO_MAX_S, lo_user + 1.0)
-            mu = float(np.clip(0.5 * (lo_user + hi_user), 24.0, 26.0))
-            sd = max((hi_user - lo_user) / 6.0, 0.5)
-            lo = lo_user
-            hi = hi_user
+        if use_custom_tgo and vcl > 1e-6:
+            lo = float(lo_user)
+            hi = float(hi_user)
+            mode = float(mode_user)
+            tgo = float(rng.triangular(lo, mode, hi))
+            r0 = (vcl * tgo) / 3600.0
         else:
-            if scenario == "Head-on":
-                mu, sd = 25.0, 5.0
-            elif scenario == "Crossing":
-                mu, sd = 22.0, 6.0
+            r0 = float(rng.uniform(min(r0_min_nm, r0_max_nm), max(r0_min_nm, r0_max_nm)))
+            tgo_geom = time_to_go_from_geometry(r0, vcl)
+            if use_custom_tgo:
+                lo = float(lo_user)
+                hi = float(hi_user)
+                mode = float(mode_user)
             else:
-                mu, sd = 30.0, 8.0
-            lo = TGO_MIN_S
-            hi = TGO_MAX_S
-        geom_limit = tgo_geom if tgo_geom is not None else TGO_MAX_S
-        hi = min(hi, geom_limit)
-        hi = float(np.clip(hi, lo + 0.5, TGO_MAX_S))
-        if hi <= lo + 1e-3:
-            hi = min(TGO_MAX_S, lo + 1.0)
-        tgo = float(np.clip(rng.normal(mu, sd), lo, hi))
+                lo = TGO_MIN_S
+                hi = TGO_MAX_S
+                if scenario == "Head-on":
+                    mu, sd = 25.0, 5.0
+                elif scenario == "Crossing":
+                    mu, sd = 22.0, 6.0
+                else:
+                    mu, sd = 30.0, 8.0
+            if tgo_geom is not None:
+                hi = min(hi, tgo_geom)
+            hi = float(np.clip(hi, lo + 0.5, TGO_MAX_S))
+            if hi <= lo + 1e-3:
+                hi = min(TGO_MAX_S, lo + 1.0)
+            if use_custom_tgo:
+                tgo = float(rng.triangular(lo, mode, hi))
+            else:
+                tgo = float(np.clip(rng.normal(mu, sd), lo, hi))
+            if use_custom_tgo and vcl <= 1e-6:
+                # Degenerate geometry; retain user-specified range settings.
+                r0 = float(rng.uniform(min(r0_min_nm, r0_max_nm), max(r0_min_nm, r0_max_nm)))
 
         leveloff_context = aggressiveness <= 1e-6
         vz0_pl = sample_initial_vs_with_aggressiveness(rng, aggressiveness, leveloff_context)
@@ -686,7 +714,7 @@ def run_batch(
                     jitter=jitter_priors,
                 )
 
-        pl_delay = max(0.0, rng.normal(PL_DELAY_MEAN_S, PL_DELAY_SD_S))
+        pl_delay = PL_DELAY_MEAN_S
 
         times, vs_pl = vs_time_series(
             tgo,
@@ -744,7 +772,7 @@ def run_batch(
                 pl_accel_g=PL_ACCEL_G,
                 pl_cap=PL_VS_CAP_FPM,
                 cat_delay=1.0,
-                cat_accel_g=0.20,
+                cat_accel_g=0.35,
                 cat_vs_strength=CAT_STRENGTH_FPM,
                 cat_cap=CAT_CAP_STRENGTH_FPM,
                 decision_latency_s=float(np.clip(rng.normal(1.0, 0.2), 0.6, 1.4)),
@@ -760,13 +788,15 @@ def run_batch(
         sep_trace = np.abs(z_ca - z_pl)
         miss_cpa_ft = float(abs(z_ca[-1] - z_pl[-1]))
         margin_trace = sep_trace - alim_ft
-        window_mask = times >= (times[-1] - 1.0)
+        cpa_time = float(times[-1])
+        window_mask = np.abs(times - cpa_time) <= 1.0
         if not np.any(window_mask):
             window_mask[-1] = True
         outside_mask = ~window_mask
         sep_window_min_ft = float(np.min(sep_trace[window_mask]))
         alim_breach_cpa = bool(sep_trace[-1] < alim_ft)
-        alim_breach_margin = bool(np.any(sep_trace[window_mask] < alim_ft))
+        alim_breach_cpa_window = bool(np.any(sep_trace[window_mask] < alim_ft))
+        alim_breach_margin = alim_breach_cpa_window
         alim_breach_outside = bool(np.any(sep_trace[outside_mask] < alim_ft)) if np.any(outside_mask) else False
         margin_min_ft = float(np.min(margin_trace))
 
@@ -814,6 +844,7 @@ def run_batch(
                 sep_window_min_ft=sep_window_min_ft,
                 margin_min_ft=margin_min_ft,
                 alim_breach_cpa=alim_breach_cpa,
+                alim_breach_cpa_window=alim_breach_cpa_window,
                 alim_breach_margin=alim_breach_margin,
                 alim_breach_outside=alim_breach_outside,
                 eventtype=eventtype,
@@ -859,6 +890,7 @@ __all__ = [
     "alim_ft_from_alt",
     "first_move_time",
     "compliance_score_method_b_like",
+    "sanitize_tgo_bounds",
     "sample_initial_vs_with_aggressiveness",
     "simulate_miss_for_senses",
     "choose_optimal_sense",
