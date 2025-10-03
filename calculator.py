@@ -16,6 +16,7 @@ Implements the requested amendments on top of your functioning codebase:
 from __future__ import annotations
 
 import io
+from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -45,6 +46,30 @@ ALIM_CHOICES = [
     ("FL100–FL200 (400 ft)", 400.0),
     ("FL200–FL420 (600 ft)", 600.0),
 ]
+
+APFD_DEFAULT_MODE = "custom"
+APFD_DEFAULT_SHARE = 0.35
+APFD_CUSTOM_SHARE_KEY = "apfd_custom_share"
+APFD_OPTION_KEY = "apfd_option"
+APFD_PRESET_MAP = {
+    "Mixed global traffic (10%)": ("mixed", 0.10),
+    "Airbus-centric (30%)": ("airbus", 0.30),
+}
+
+
+def sanitize_apfd_config(option: str, share_value: Optional[float]) -> Tuple[str, float]:
+    """Return a valid AP/FD mode string and share bounded to [0, 1]."""
+
+    if option in APFD_PRESET_MAP:
+        return APFD_PRESET_MAP[option]
+
+    # Default to the custom selection when the option is unrecognised.
+    try:
+        share = float(share_value if share_value is not None else APFD_DEFAULT_SHARE)
+    except (TypeError, ValueError):
+        share = APFD_DEFAULT_SHARE
+    share = float(np.clip(share, 0.0, 1.0))
+    return APFD_DEFAULT_MODE, share
 
 # ------------------------------- Streamlit UI -------------------------------
 
@@ -128,6 +153,9 @@ with st.sidebar:
             value=True,
             help="Randomly perturb the prior probabilities each batch to reflect modelling uncertainty."
         )
+        if APFD_CUSTOM_SHARE_KEY not in st.session_state:
+            st.session_state[APFD_CUSTOM_SHARE_KEY] = APFD_DEFAULT_SHARE
+
         apfd_option = st.selectbox(
             "AP/FD configuration",
             [
@@ -135,26 +163,31 @@ with st.sidebar:
                 "Mixed global traffic (10%)",
                 "Airbus-centric (30%)",
             ],
+            key=APFD_OPTION_KEY,
             help="Choose how autopilot/flight-director usage is represented in the Monte Carlo runs."
         )
+
+        apfd_raw_share = st.session_state.get(APFD_CUSTOM_SHARE_KEY, APFD_DEFAULT_SHARE)
+
         if apfd_option == "Custom share":
-            apfd_mode = "custom"
-            apfd_share = st.slider(
+            apfd_raw_share = st.slider(
                 "AP/FD share",
                 0.0,
                 1.0,
-                0.35,
-                0.05,
+                value=float(apfd_raw_share),
+                step=0.05,
+                key=APFD_CUSTOM_SHARE_KEY,
                 help="Share of crews flying via AP/FD, which lowers delay and slightly boosts acceleration."
             )
-        elif apfd_option.startswith("Mixed"):
-            apfd_mode = "mixed"
-            apfd_share = 0.10
-            st.caption("Mixed global traffic fixes AP/FD usage at 10% with deterministic CAT kinematics for that share.")
-        else:
-            apfd_mode = "airbus"
-            apfd_share = 0.30
-            st.caption("Airbus-centric traffic fixes AP/FD usage at 30% with deterministic CAT kinematics for that share.")
+        elif apfd_option in APFD_PRESET_MAP:
+            preset_mode, _ = APFD_PRESET_MAP[apfd_option]
+            if preset_mode == "mixed":
+                st.caption("Mixed global traffic fixes AP/FD usage at 10% with deterministic CAT kinematics for that share.")
+            elif preset_mode == "airbus":
+                st.caption("Airbus-centric traffic fixes AP/FD usage at 30% with deterministic CAT kinematics for that share.")
+
+        apfd_mode, apfd_share = sanitize_apfd_config(apfd_option, apfd_raw_share)
+        apfd_share_sanitized = float(apfd_share)
         st.markdown("**Non-compliance priors** (updated baseline)")
         p_opp = st.number_input(
             "P(opposite-sense)",
@@ -300,7 +333,7 @@ with tabs[1]:
             r0_min_nm=float(r0_min), r0_max_nm=float(r0_max),
             aggressiveness=float(aggressiveness),
             p_opp=float(p_opp), p_ta=float(p_ta), p_weak=float(p_weak),
-            jitter_priors=bool(jitter), apfd_share=float(apfd_share),
+            jitter_priors=bool(jitter), apfd_share=apfd_share_sanitized,
             use_delay_mixture=True,
             dt=0.1,
             hdg1_min=float(hdg1_min), hdg1_max=float(hdg1_max),
