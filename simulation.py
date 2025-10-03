@@ -62,6 +62,9 @@ REVERSAL_IMPROVEMENT_HOLD_S = 1.5
 REVERSAL_IMPROVEMENT_DISABLE_TAU_S = 4.0
 PREDICTED_MISS_IMPROVEMENT_TOL_FT = 5.0
 
+# Safeguard for repeated manoeuvre phases
+MAX_MANEUVER_PHASES = 4
+
 # Sense determination
 VS_SENSE_DEADBAND_FPM = 50.0
 
@@ -898,35 +901,98 @@ def run_batch(
         alim_ft = alim_ft_from_alt(FL_PL * 100.0, override_ft=alim_override_ft)
 
         manual_case = not cat_is_apfd
-        eventtype, minsep_ft, sep_cpa_ft, t_detect, event_detail = classify_event(
-            times,
-            z_pl,
-            z_ca,
-            vs_pl,
-            vs_ca,
-            tgo,
-            alim_ft=alim_ft,
-            margin_ft=ALIM_MARGIN_FT,
-            sense_chosen_cat=sense_ca,
-            sense_exec_cat=sense_cat_exec,
-            manual_case=manual_case,
-        )
 
-        tau_detect_s = max(0.0, tgo - t_detect)
-        t2_issue = None
+        current_times = times
+        current_vs_pl = vs_pl
+        current_vs_ca = vs_ca
+        current_z_pl = z_pl
+        current_z_ca = z_ca
+        current_sense_pl = sense_pl
+        current_sense_cat_exec = sense_cat_exec
+        current_sense_chosen = sense_ca
+
+        eval_start_time = 0.0
+        maneuver_sequence: List[Dict[str, object]] = []
+        eventtype_initial: Optional[str] = None
+        event_detail_initial: Optional[str] = None
+        t_detect_initial: Optional[float] = None
+        tau_detect_initial: Optional[float] = None
+        final_eventtype: Optional[str] = None
+        final_event_detail: Optional[str] = None
+        final_t_detect: Optional[float] = None
+        final_tau_detect: Optional[float] = None
+        t_second_issue: Optional[float] = None
         tau_second_issue_s: Optional[float] = None
-        if eventtype in ("STRENGTHEN", "REVERSE"):
+
+        for phase in range(MAX_MANEUVER_PHASES):
+            if current_times.size == 0:
+                break
+
+            if eval_start_time <= current_times[0] + 1e-9:
+                start_idx = 0
+            else:
+                start_idx = int(np.searchsorted(current_times, eval_start_time - 1e-9, side="left"))
+
+            times_eval = current_times[start_idx:]
+            if times_eval.size == 0:
+                break
+
+            vs_pl_eval = current_vs_pl[start_idx:]
+            vs_ca_eval = current_vs_ca[start_idx:]
+            z_pl_eval = current_z_pl[start_idx:]
+            z_ca_eval = current_z_ca[start_idx:]
+
+            eventtype, _, _, t_detect, event_detail = classify_event(
+                times_eval,
+                z_pl_eval,
+                z_ca_eval,
+                vs_pl_eval,
+                vs_ca_eval,
+                tgo,
+                alim_ft=alim_ft,
+                margin_ft=ALIM_MARGIN_FT,
+                sense_chosen_cat=current_sense_chosen,
+                sense_exec_cat=current_sense_cat_exec,
+                manual_case=manual_case,
+            )
+
+            tau_detect = max(0.0, tgo - t_detect)
+
+            if phase == 0:
+                eventtype_initial = str(eventtype)
+                event_detail_initial = event_detail
+                t_detect_initial = float(t_detect)
+                tau_detect_initial = float(tau_detect)
+
+            final_eventtype = str(eventtype)
+            final_event_detail = event_detail
+            final_t_detect = float(t_detect)
+            final_tau_detect = float(tau_detect)
+
+            maneuver_sequence.append(
+                dict(
+                    phase=phase + 1,
+                    eventtype=str(eventtype),
+                    event_detail=event_detail,
+                    t_issue=float(t_detect),
+                    tau_issue=float(tau_detect),
+                )
+            )
+
+            if eventtype not in ("STRENGTHEN", "REVERSE"):
+                break
+
             force_exigent = bool(event_detail == "EXIGENT_STRENGTHEN")
             second_phase_cat_delay = 0.9 if cat_is_apfd else 2.5
             times2, vs_pl2, vs_ca2, t2_issue = apply_second_phase(
-                times,
-                vs_pl,
-                vs_ca,
+                current_times,
+                current_vs_pl,
+                current_vs_ca,
                 tgo,
                 dt,
                 eventtype,
-                sense_pl,
-                sense_cat_exec,
+                current_sense_pl,
+                current_sense_cat_exec,
                 pl_vs0=vz0_pl,
                 cat_vs0=vz0_cat,
                 t_classify=t_detect,
@@ -941,16 +1007,60 @@ def run_batch(
                 cat_mode=mode,
                 force_exigent=force_exigent,
             )
-            if t2_issue is not None:
-                tau_second_issue_s = max(0.0, tgo - t2_issue)
-                z_pl2 = integrate_altitude_from_vs(times2, vs_pl2, 0.0)
-                z_ca2 = integrate_altitude_from_vs(times2, vs_ca2, h0 if cat_above else -h0)
-                sep2 = np.abs(z_ca2 - z_pl2)
-                minsep_ft = float(np.min(sep2))
-                sep_cpa_ft = float(sep2[-1])
-                times, vs_pl, vs_ca, z_pl, z_ca = times2, vs_pl2, vs_ca2, z_pl2, z_ca2
+
+            if t2_issue is None:
+                break
+
+            if t_second_issue is None:
+                t_second_issue = float(t2_issue)
+                tau_second_issue_s = float(max(0.0, tgo - t_second_issue))
+
+            current_times = times2
+            current_vs_pl = vs_pl2
+            current_vs_ca = vs_ca2
+            current_z_pl = integrate_altitude_from_vs(current_times, current_vs_pl, 0.0)
+            current_z_ca = integrate_altitude_from_vs(
+                current_times,
+                current_vs_ca,
+                h0 if cat_above else -h0,
+            )
+
+            if eventtype == "REVERSE":
+                current_sense_pl = -current_sense_pl
+                current_sense_cat_exec = -current_sense_cat_exec
+                current_sense_chosen = -current_sense_chosen
+
+            eval_start_time = float(t2_issue)
+
+            if (tgo - t2_issue) <= dt or phase == MAX_MANEUVER_PHASES - 1:
+                break
+
+        if eventtype_initial is None:
+            eventtype_initial = "NONE"
+        if final_eventtype is None:
+            final_eventtype = eventtype_initial
+        if event_detail_initial is None:
+            event_detail_initial = None
+        if final_event_detail is None:
+            final_event_detail = event_detail_initial
+        if t_detect_initial is None:
+            t_detect_initial = float(times[-1]) if times.size else 0.0
+        if final_t_detect is None:
+            final_t_detect = t_detect_initial
+        if tau_detect_initial is None:
+            tau_detect_initial = max(0.0, tgo - t_detect_initial)
+        if final_tau_detect is None:
+            final_tau_detect = tau_detect_initial
+
+        times = current_times
+        vs_pl = current_vs_pl
+        vs_ca = current_vs_ca
+        z_pl = current_z_pl
+        z_ca = current_z_ca
 
         sep_trace = np.abs(z_ca - z_pl)
+        minsep_ft = float(np.min(sep_trace))
+        sep_cpa_ft = float(sep_trace[-1])
         miss_cpa_ft = float(abs(z_ca[-1] - z_pl[-1]))
         margin_trace = sep_trace - alim_ft
         margin_min_ft = float(np.min(margin_trace))
@@ -1004,12 +1114,17 @@ def run_batch(
                 margin_cpa_ft=margin_cpa_ft,
                 alim_breach_cpa=alim_breach_cpa,
                 alim_breach_cpa_excl25=alim_breach_cpa_flex,
-                eventtype=eventtype,
-                event_detail=event_detail,
-                t_detect=t_detect,
-                tau_detect=tau_detect_s,
-                t_second_issue=t2_issue,
+                eventtype=eventtype_initial,
+                event_detail=event_detail_initial,
+                t_detect=t_detect_initial,
+                tau_detect=tau_detect_initial,
+                t_second_issue=t_second_issue,
                 tau_second_issue=tau_second_issue_s,
+                eventtype_final=final_eventtype,
+                event_detail_final=final_event_detail,
+                t_detect_final=final_t_detect,
+                tau_detect_final=final_tau_detect,
+                maneuver_sequence=tuple(maneuver_sequence),
                 comp_label=comp_label,
                 CAT_is_APFD=int(cat_is_apfd),
                 residual_risk=residual_risk,
@@ -1042,6 +1157,7 @@ __all__ = [
     "REVERSAL_EVAL_DELAY_S",
     "ALIM_FLEX_FT",
     "ALIM_BANDS_FT",
+    "MAX_MANEUVER_PHASES",
     # helpers
     "ias_to_tas",
     "vs_time_series",
