@@ -442,9 +442,8 @@ def classify_event(
             reversal_reason = "Opposite sense"
             return ("REVERSE", minsep, sep_cpa, t_detect, reversal_reason)
 
-        response_delay = t_ca_move - t_pl_move
         cat_response_mag = float(np.max(np.abs(vs_ca[: idx + 1])))
-        if (cat_response_mag < 0.7 * CAT_INIT_VS_FPM) or (response_delay > 2.0):
+        if cat_response_mag < 0.7 * CAT_INIT_VS_FPM:
             reversal_reason = "Slow response"
             return ("REVERSE", minsep, sep_cpa, t_detect, reversal_reason)
 
