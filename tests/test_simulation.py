@@ -11,6 +11,8 @@ from simulation import (
     CAT_CAP_STRENGTH_FPM,
     CAT_INIT_VS_FPM,
     CAT_STRENGTH_FPM,
+    FT_PER_M,
+    G,
     PL_ACCEL_G,
     PL_DELAY_MEAN_S,
     PL_VS_CAP_FPM,
@@ -31,6 +33,36 @@ def test_ias_to_tas_behaviour():
 
     assert np.isclose(tas_sl, 200.0, atol=1e-6)
     assert tas_mid > tas_sl
+
+
+def test_vs_time_series_post_delay_slope_matches_commanded_accel():
+    t_end = 4.0
+    dt = 0.2
+    t_delay = 1.0
+    a_g = 0.25
+    v_target = 4000.0
+    expected_slope = a_g * G * FT_PER_M * 60.0
+
+    for sense in (+1, -1):
+        times, vs = vs_time_series(
+            t_end,
+            dt,
+            t_delay,
+            a_g,
+            v_target,
+            sense=sense,
+            cap_fpm=None,
+            vs0_fpm=0.0,
+        )
+
+        post_mask = times > t_delay
+        post_times = times[post_mask]
+        post_vs = vs[post_mask]
+
+        assert post_times.size >= 3
+
+        slopes = np.diff(post_vs) / np.diff(post_times)
+        assert np.allclose(slopes, sense * expected_slope, atol=1e-6)
 
 
 def test_apply_second_phase_reverse_changes_sense():
@@ -454,7 +486,7 @@ def test_classify_event_apfd_improvement_strengthens_instead_of_reversing():
 
     assert eventtype == "STRENGTHEN"
     assert event_detail is None
-    assert np.isclose(t_detect, 1.4)
+    assert np.isclose(t_detect, 1.2)
 
 
 def test_run_batch_deterministic_seed():

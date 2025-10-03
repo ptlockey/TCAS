@@ -113,7 +113,7 @@ def vs_time_series(
 
     a = a_g * G
     v_target = v_f_fpm if cap_fpm is None else min(v_f_fpm, cap_fpm)
-    a_fpm_s = a * 60.0
+    a_fpm_s = a * FT_PER_M * 60.0
     times = np.arange(0.0, t_end_s + 1e-9, dt_s)
     vs_fpm = np.zeros_like(times, dtype=float)
     target_signed = sense * v_target
