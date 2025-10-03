@@ -41,8 +41,8 @@ TGO_MAX_S = 35.0
 # ALIM margin for classification conservatism (ft)
 ALIM_MARGIN_FT = 100.0
 
-# Seconds after initial response before reversal monitoring activates
-REVERSAL_EVAL_DELAY_S = 8.0
+# Time-to-go guard before reversal monitoring can act (s)
+REVERSAL_GUARD_TGO_S = 12.0
 
 # Flexible margin for reporting ALIM breaches at CPA (ft)
 ALIM_FLEX_FT = 25.0
@@ -411,34 +411,39 @@ def classify_event(
     t_pl_move = first_move_time(times, vs_pl)
     t_ca_move = first_move_time(times, vs_ca)
     response_start = max(t_pl_move, t_ca_move)
-    eval_start = response_start + REVERSAL_EVAL_DELAY_S
-    eval_threshold = float(np.clip(eval_start, 0.0, times[-1]))
-    mask = times >= eval_threshold
-    if not np.any(mask):
-        mask = np.zeros_like(times, dtype=bool)
-        mask[-1] = True
 
     reversal_reason: Optional[str] = None
-    t_detect = float(times[np.where(mask)[0][-1]])
+    t_detect = float(times[-1])
 
-    t_obs = times[mask]
-    sep_obs = sep[mask]
     rel_rate = (vs_ca - vs_pl) / 60.0
-    rel_obs = rel_rate[mask]
-    s_last = float(sep_obs[-1])
-    r_last = float(rel_obs[-1])
-    t_rem = max(0.0, tgo - t_obs[-1])
-    pred_miss = abs(s_last + r_last * t_rem)
-    approaching = r_last < 0
-    thin_pred = pred_miss < (alim_ft - margin_ft)
 
-    if approaching and thin_pred:
+    for idx, t_now in enumerate(times):
+        if t_now < response_start:
+            continue
+
+        sep_now = float(sep[idx])
+        rel_now = float(rel_rate[idx])
+        approaching = rel_now < 0
+        if not approaching:
+            continue
+
+        t_rem = max(0.0, tgo - float(t_now))
+        guard_open = t_rem <= REVERSAL_GUARD_TGO_S
+        if not guard_open:
+            continue
+
+        pred_miss = abs(sep_now + rel_now * t_rem)
+        thin_pred = pred_miss < alim_ft
+        if not thin_pred:
+            continue
+
+        t_detect = float(t_now)
         if sense_chosen_cat != sense_exec_cat:
             reversal_reason = "Opposite sense"
             return ("REVERSE", minsep, sep_cpa, t_detect, reversal_reason)
-        cat_response_mag = float(np.max(np.abs(vs_ca[mask])))
-        response_delay = t_ca_move - t_pl_move
-        if (cat_response_mag < 0.7 * CAT_INIT_VS_FPM) or (response_delay > 2.0):
+
+        cat_response_mag = float(np.max(np.abs(vs_ca[: idx + 1])))
+        if cat_response_mag < 0.7 * CAT_INIT_VS_FPM:
             reversal_reason = "Slow response"
             return ("REVERSE", minsep, sep_cpa, t_detect, reversal_reason)
 
