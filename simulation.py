@@ -50,6 +50,16 @@ ALIM_FLEX_FT = 25.0
 # Predicted-miss pad for triggering strengthen early (ft)
 STRENGTHEN_PAD_FT = 150.0
 
+# Subsequent-manoeuvre tuning
+EXIGENT_STRENGTHEN_TGO_S = 8.0
+NO_RESPONSE_ESCALATION_S = 3.0
+NO_RESPONSE_VS_THRESH_FPM = 100.0
+
+# Reversal management
+REVERSAL_INTERLOCK_LOOKBACK_S = 1.8
+REVERSAL_INTERLOCK_TGO_MIN_S = 18.0
+PREDICTED_MISS_IMPROVEMENT_TOL_FT = 5.0
+
 
 def sanitize_tgo_bounds(
     tgo_min_s: Optional[float], tgo_max_s: Optional[float]
@@ -404,8 +414,9 @@ def classify_event(
     margin_ft: float,
     sense_chosen_cat: int,
     sense_exec_cat: int,
+    manual_case: bool = False,
 ) -> Tuple[str, float, float, float, Optional[str]]:
-    """Return (event_label, minsep, sep@CPA, t_detect, reversal_reason)."""
+    """Return (event_label, minsep, sep@CPA, t_detect, event_detail)."""
 
     sep = np.abs(z_ca - z_pl)
     minsep = float(np.min(sep))
@@ -415,51 +426,80 @@ def classify_event(
     t_ca_move = first_move_time(times, vs_ca)
     response_start = max(t_pl_move, t_ca_move)
 
-    reversal_reason: Optional[str] = None
+    event_detail: Optional[str] = None
     t_detect = float(times[-1])
 
     rel_rate = (vs_ca - vs_pl) / 60.0
 
+    no_response_checked = False
+
     for idx, t_now in enumerate(times):
+        rel_now = float(rel_rate[idx])
+
+        if manual_case and sense_chosen_cat == sense_exec_cat and not no_response_checked:
+            if rel_now < 0 and t_now >= NO_RESPONSE_ESCALATION_S:
+                no_response_checked = True
+                vs_toward_command = float(vs_ca[idx] * sense_chosen_cat)
+                if vs_toward_command <= NO_RESPONSE_VS_THRESH_FPM:
+                    t_strengthen = float(t_now)
+                    return ("STRENGTHEN", minsep, sep_cpa, t_strengthen, "EXIGENT_STRENGTHEN")
+
         if t_now < response_start:
             continue
 
         sep_now = float(sep[idx])
-        rel_now = float(rel_rate[idx])
         approaching = rel_now < 0
         if not approaching:
             continue
+
+        vs_toward_command = float(vs_ca[idx] * sense_chosen_cat)
 
         t_rem = max(0.0, tgo - float(t_now))
         # Guard window only
         if t_rem > REVERSAL_GUARD_TGO_S:
             continue
-            
+
         pred_miss = abs(sep_now + rel_now * t_rem)
-        # Must be same sense as executed CAT
-       
-        if sense_chosen_cat != sense_exec_cat:
-            continue
+        same_sense = sense_chosen_cat == sense_exec_cat
         # Strengthen if predicted miss is close to ALIM (with pad)
         strengthen_threshold = alim_ft + STRENGTHEN_PAD_FT
-        if pred_miss <= strengthen_threshold:
+        if same_sense and pred_miss <= strengthen_threshold:
             t_strengthen = float(t_now)
             return ("STRENGTHEN", minsep, sep_cpa, t_strengthen, None)
-            
+
         #Otherwise apply the riginal thin-pred gate
         thin_pred = pred_miss < alim_ft
         if not thin_pred:
             continue
 
         t_detect = float(t_now)
-        if sense_chosen_cat != sense_exec_cat:
-            reversal_reason = "Opposite sense"
-            return ("REVERSE", minsep, sep_cpa, t_detect, reversal_reason)
+        t_lb = max(response_start, t_now - REVERSAL_INTERLOCK_LOOKBACK_S)
+        if t_lb < t_now:
+            sep_lb = float(np.interp(t_lb, times, sep))
+            rel_lb = float(np.interp(t_lb, times, rel_rate))
+            t_rem_lb = max(0.0, tgo - t_lb)
+            pred_miss_lb = abs(sep_lb + rel_lb * t_rem_lb)
+        else:
+            pred_miss_lb = pred_miss
 
-        cat_response_mag = float(np.max(np.abs(vs_ca[: idx + 1])))
-        if cat_response_mag < 0.7 * CAT_INIT_VS_FPM:
-            reversal_reason = "Slow response"
-            return ("REVERSE", minsep, sep_cpa, t_detect, reversal_reason)
+        improving = pred_miss > pred_miss_lb + PREDICTED_MISS_IMPROVEMENT_TOL_FT
+
+        vs_toward_exec = float(vs_ca[idx] * sense_exec_cat)
+        achieved_vs = max(0.0, vs_toward_exec)
+        enough_vs = achieved_vs >= 0.7 * CAT_INIT_VS_FPM
+
+        if same_sense and t_rem >= REVERSAL_INTERLOCK_TGO_MIN_S and improving and enough_vs:
+            continue
+
+        if not same_sense:
+            event_detail = "Opposite sense"
+            return ("REVERSE", minsep, sep_cpa, t_detect, event_detail)
+
+        if enough_vs:
+            event_detail = "Geometry shortfall"
+        else:
+            event_detail = "Slow response"
+        return ("REVERSE", minsep, sep_cpa, t_detect, event_detail)
 
     return ("NONE", minsep, sep_cpa, t_detect, None)
 
@@ -485,6 +525,7 @@ def apply_second_phase(
     cat_cap: float = CAT_CAP_STRENGTH_FPM,
     decision_latency_s: float = 1.0,
     cat_mode: str = "compliant",
+    force_exigent: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[float]]:
     """Execute STRENGTHEN/REVERSE and continue the kinematics until CPA."""
 
@@ -506,18 +547,27 @@ def apply_second_phase(
     mode_key = (cat_mode or "").lower().strip()
     canonical_mode = mode_key.replace(" ", "").replace("/", "")
     if eventtype == "STRENGTHEN":
+        cat_accel_eff = cat_accel_g
+        cat_vs_eff = cat_vs_strength
+        cat_cap_eff = cat_cap
+        exigent_active = force_exigent or (t_rem <= EXIGENT_STRENGTHEN_TGO_S)
+
         if canonical_mode in {"compliant", "apfd"}:
-            cat_accel_eff = max(cat_accel_g, 0.35)
-            cat_vs_eff = max(cat_vs_strength, CAT_STRENGTH_FPM)
-            cat_cap_eff = max(cat_cap, CAT_CAP_STRENGTH_FPM)
+            cat_accel_eff = max(cat_accel_eff, 0.35)
+            cat_vs_eff = max(cat_vs_eff, CAT_STRENGTH_FPM)
+            cat_cap_eff = max(cat_cap_eff, CAT_CAP_STRENGTH_FPM)
         elif "weak" in mode_key:
-            cat_accel_eff = 0.20
-            cat_vs_eff = 1800.0
-            cat_cap_eff = 2000.0
+            cat_accel_eff = 0.25
+            cat_vs_eff = max(cat_vs_eff, CAT_STRENGTH_FPM)
+            cat_cap_eff = max(cat_cap_eff, CAT_CAP_STRENGTH_FPM)
         else:
-            cat_accel_eff = cat_accel_g
-            cat_vs_eff = cat_vs_strength
-            cat_cap_eff = cat_cap
+            if exigent_active:
+                cat_accel_eff = max(cat_accel_eff, 0.25)
+
+        if exigent_active:
+            cat_accel_eff = max(cat_accel_eff, 0.35)
+            cat_vs_eff = max(cat_vs_eff, CAT_CAP_STRENGTH_FPM)
+            cat_cap_eff = max(cat_cap_eff, CAT_CAP_STRENGTH_FPM)
     else:
         cat_accel_eff = cat_accel_g
         cat_vs_eff = cat_vs_strength
@@ -774,7 +824,8 @@ def run_batch(
 
         alim_ft = alim_ft_from_alt(FL_PL * 100.0, override_ft=alim_override_ft)
 
-        eventtype, minsep_ft, sep_cpa_ft, t_detect, reversal_reason = classify_event(
+        manual_case = not cat_is_apfd
+        eventtype, minsep_ft, sep_cpa_ft, t_detect, event_detail = classify_event(
             times,
             z_pl,
             z_ca,
@@ -785,12 +836,15 @@ def run_batch(
             margin_ft=ALIM_MARGIN_FT,
             sense_chosen_cat=sense_ca,
             sense_exec_cat=sense_cat_exec,
+            manual_case=manual_case,
         )
 
         tau_detect_s = max(0.0, tgo - t_detect)
         t2_issue = None
         tau_second_issue_s: Optional[float] = None
         if eventtype in ("STRENGTHEN", "REVERSE"):
+            force_exigent = bool(event_detail == "EXIGENT_STRENGTHEN")
+            second_phase_cat_delay = 0.9 if cat_is_apfd else 2.5
             times2, vs_pl2, vs_ca2, t2_issue = apply_second_phase(
                 times,
                 vs_pl,
@@ -806,12 +860,13 @@ def run_batch(
                 pl_delay=pl_delay,
                 pl_accel_g=PL_ACCEL_G,
                 pl_cap=PL_VS_CAP_FPM,
-                cat_delay=0.9,
+                cat_delay=second_phase_cat_delay,
                 cat_accel_g=0.35,
                 cat_vs_strength=CAT_STRENGTH_FPM,
                 cat_cap=CAT_CAP_STRENGTH_FPM,
                 decision_latency_s=float(np.clip(rng.normal(1.0, 0.2), 0.6, 1.4)),
                 cat_mode=mode,
+                force_exigent=force_exigent,
             )
             if t2_issue is not None:
                 tau_second_issue_s = max(0.0, tgo - t2_issue)
@@ -877,7 +932,7 @@ def run_batch(
                 alim_breach_cpa=alim_breach_cpa,
                 alim_breach_cpa_excl25=alim_breach_cpa_flex,
                 eventtype=eventtype,
-                reverse_reason=reversal_reason,
+                event_detail=event_detail,
                 t_detect=t_detect,
                 tau_detect=tau_detect_s,
                 t_second_issue=t2_issue,

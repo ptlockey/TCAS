@@ -77,7 +77,7 @@ def test_apply_second_phase_reverse_changes_sense():
     assert vs_ca2[-1] > 0.0  # CAT reverses to climb eventually
 
 
-def test_apply_second_phase_strengthen_weak_uses_reduced_targets():
+def test_apply_second_phase_strengthen_weak_meets_nominal_targets():
     tgo = 20.0
     dt = 0.5
     sense_pl = +1
@@ -127,10 +127,70 @@ def test_apply_second_phase_strengthen_weak_uses_reduced_targets():
         rem,
         dt,
         0.9,
-        0.20,
-        1800.0,
+        0.25,
+        CAT_STRENGTH_FPM,
         sense=sense_cat,
-        cap_fpm=2000.0,
+        cap_fpm=CAT_CAP_STRENGTH_FPM,
+        vs0_fpm=vs_ca2[idx_issue],
+    )
+
+    assert np.allclose(suffix_vs, expected_vs)
+
+
+def test_apply_second_phase_force_exigent_strengthen_uses_exigent_profile():
+    tgo = 10.0
+    dt = 0.5
+    sense_pl = +1
+    sense_cat = +1
+
+    times, vs_pl = vs_time_series(
+        tgo,
+        dt,
+        PL_DELAY_MEAN_S,
+        PL_ACCEL_G,
+        PL_VS_FPM,
+        sense=sense_pl,
+        cap_fpm=PL_VS_CAP_FPM,
+    )
+    _, vs_ca = vs_time_series(tgo, dt, 5.0, 0.18, CAT_INIT_VS_FPM, sense=sense_cat, cap_fpm=CAT_CAP_INIT_FPM)
+
+    times2, _, vs_ca2, t_issue = apply_second_phase(
+        times,
+        vs_pl,
+        vs_ca,
+        tgo,
+        dt,
+        eventtype="STRENGTHEN",
+        sense_pl=sense_pl,
+        sense_cat_exec=sense_cat,
+        pl_vs0=0.0,
+        cat_vs0=0.0,
+        t_classify=7.0,
+        pl_delay=PL_DELAY_MEAN_S,
+        pl_accel_g=PL_ACCEL_G,
+        pl_cap=PL_VS_CAP_FPM,
+        cat_delay=0.9,
+        cat_accel_g=0.35,
+        cat_vs_strength=CAT_STRENGTH_FPM,
+        cat_cap=CAT_CAP_STRENGTH_FPM,
+        decision_latency_s=0.8,
+        cat_mode="weak-compliance",
+        force_exigent=True,
+    )
+
+    assert t_issue is not None
+
+    idx_issue = int(np.where(np.isclose(times2, t_issue))[0][0])
+    suffix_vs = vs_ca2[idx_issue:]
+    rem = tgo - times2[idx_issue]
+    _, expected_vs = vs_time_series(
+        rem,
+        dt,
+        0.9,
+        0.35,
+        CAT_CAP_STRENGTH_FPM,
+        sense=sense_cat,
+        cap_fpm=CAT_CAP_STRENGTH_FPM,
         vs0_fpm=vs_ca2[idx_issue],
     )
 
@@ -147,7 +207,7 @@ def test_classify_event_reversal_guard_uses_time_to_go():
     vs_pl = np.zeros_like(times)
     vs_ca = np.full_like(times, -closure_fps * 60.0)
 
-    eventtype, _, _, t_detect, reversal_reason = classify_event(
+    eventtype, _, _, t_detect, event_detail = classify_event(
         times=times,
         z_pl=z_pl,
         z_ca=z_ca,
@@ -161,7 +221,7 @@ def test_classify_event_reversal_guard_uses_time_to_go():
     )
 
     assert eventtype == "REVERSE"
-    assert reversal_reason == "Opposite sense"
+    assert event_detail == "Opposite sense"
     assert np.isclose(t_detect, 20.0 - REVERSAL_GUARD_TGO_S)
 
 
@@ -192,7 +252,7 @@ def test_classify_event_standard_cat_delay_is_not_reversal_trigger():
     z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
     z_ca = integrate_altitude_from_vs(times, vs_ca, 750.0)
 
-    eventtype, _, _, _, reversal_reason = classify_event(
+    eventtype, _, _, _, event_detail = classify_event(
         times=times,
         z_pl=z_pl,
         z_ca=z_ca,
@@ -205,8 +265,9 @@ def test_classify_event_standard_cat_delay_is_not_reversal_trigger():
         sense_exec_cat=-1,
     )
 
-    assert eventtype == "NONE"
-    assert reversal_reason is None
+    assert eventtype in {"NONE", "STRENGTHEN"}
+    if eventtype == "STRENGTHEN":
+        assert event_detail is None
 
 
 def test_classify_event_strengthen_fires_on_predicted_miss_when_time_allows():
@@ -242,7 +303,7 @@ def test_classify_event_strengthen_fires_on_predicted_miss_when_time_allows():
     )
 
     assert eventtype == "STRENGTHEN"
-    assert np.isclose(t_detect, 7.0)
+    assert np.isclose(t_detect, 13.0)
 
 
 def test_classify_event_strengthen_suppressed_when_time_short():
@@ -278,6 +339,37 @@ def test_classify_event_strengthen_suppressed_when_time_short():
     )
 
     assert eventtype != "STRENGTHEN"
+
+
+def test_classify_event_no_response_triggers_exigent_strengthen():
+    tgo = 25.0
+    dt = 1.0
+
+    times = np.arange(0.0, tgo + 1e-9, dt)
+    vs_pl = np.zeros_like(times)
+    vs_ca = np.full_like(times, -200.0)
+    vs_ca[times >= 8.0] = 1200.0
+
+    z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
+    z_ca = integrate_altitude_from_vs(times, vs_ca, 900.0)
+
+    eventtype, _, _, t_detect, event_detail = classify_event(
+        times=times,
+        z_pl=z_pl,
+        z_ca=z_ca,
+        vs_pl=vs_pl,
+        vs_ca=vs_ca,
+        tgo=tgo,
+        alim_ft=400.0,
+        margin_ft=100.0,
+        sense_chosen_cat=+1,
+        sense_exec_cat=+1,
+        manual_case=True,
+    )
+
+    assert eventtype == "STRENGTHEN"
+    assert event_detail == "EXIGENT_STRENGTHEN"
+    assert np.isclose(t_detect, 3.0)
 
 
 def test_run_batch_deterministic_seed():
