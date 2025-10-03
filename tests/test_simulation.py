@@ -416,6 +416,47 @@ def test_classify_event_same_sense_improvement_hold_defers_reversal():
     assert event_detail is None
 
 
+def test_classify_event_apfd_improvement_strengthens_instead_of_reversing():
+    tgo = 25.0
+    dt = 0.2
+    times = np.arange(0.0, tgo + 1e-9, dt)
+
+    _, vs_ca = vs_time_series(
+        tgo,
+        dt,
+        0.9,
+        0.25,
+        CAT_INIT_VS_FPM,
+        sense=-1,
+        cap_fpm=CAT_INIT_VS_FPM,
+    )
+    vs_pl = vs_ca + 900.0
+
+    times = times[: len(vs_ca)]
+    vs_pl = vs_pl[: len(times)]
+
+    z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
+    z_ca = integrate_altitude_from_vs(times, vs_ca, 600.0)
+
+    eventtype, _, _, t_detect, event_detail = classify_event(
+        times=times,
+        z_pl=z_pl,
+        z_ca=z_ca,
+        vs_pl=vs_pl,
+        vs_ca=vs_ca,
+        tgo=tgo,
+        alim_ft=400.0,
+        margin_ft=100.0,
+        sense_chosen_cat=-1,
+        sense_exec_cat=-1,
+        manual_case=False,
+    )
+
+    assert eventtype == "STRENGTHEN"
+    assert event_detail is None
+    assert np.isclose(t_detect, 1.4)
+
+
 def test_run_batch_deterministic_seed():
     df1 = run_batch(
         runs=20,

@@ -522,6 +522,21 @@ def classify_event(
     hold_window_satisfied = False
     prev_time = float(times[0]) if times.size else 0.0
 
+    if manual_case:
+        reversal_enable_tau_s = REVERSAL_ENABLE_TAU_S
+        improvement_hold_required_s = REVERSAL_IMPROVEMENT_HOLD_S
+        hold_tau_requirement_s = REVERSAL_HOLD_DISABLE_TAU_S
+        vs_gate_fraction = 0.7
+    else:
+        # AP/FD dynamics (0.9 s delay, 0.25 g accel) respond more slowly than
+        # the manual template.  Allow the improvement timer to accumulate below
+        # the 18 s guard and reduce the vertical-speed gate so that compliant
+        # automation is not reversed while the geometry is improving.
+        reversal_enable_tau_s = REVERSAL_ENABLE_TAU_S + 1.0
+        improvement_hold_required_s = max(0.9, 0.6 * REVERSAL_IMPROVEMENT_HOLD_S)
+        hold_tau_requirement_s = 12.0
+        vs_gate_fraction = 0.55
+
     for idx, t_now in enumerate(times):
         rel_now = float(rel_rate[idx])
         sep_now = float(sep[idx])
@@ -616,7 +631,7 @@ def classify_event(
         improving = pred_miss > pred_miss_lb + PREDICTED_MISS_IMPROVEMENT_TOL_FT
 
         achieved_vs = max(0.0, vs_toward_command) if same_sense else 0.0
-        enough_vs = achieved_vs >= 0.7 * CAT_INIT_VS_FPM
+        enough_vs = achieved_vs >= vs_gate_fraction * CAT_INIT_VS_FPM
 
         dt_sample = float(t_now - prev_time) if idx > 0 else 0.0
         tracking_improvement = same_sense and improving
@@ -626,14 +641,13 @@ def classify_event(
             improvement_timer_s = 0.0
             hold_window_satisfied = False
 
-        if (
-            tracking_improvement
-            and tau_now >= REVERSAL_HOLD_DISABLE_TAU_S
-            and improvement_timer_s >= REVERSAL_IMPROVEMENT_HOLD_S
-        ):
-            hold_window_satisfied = True
+        if tracking_improvement and improvement_timer_s >= improvement_hold_required_s:
+            if manual_case and tau_now >= REVERSAL_HOLD_DISABLE_TAU_S:
+                hold_window_satisfied = True
+            elif not manual_case and tau_now >= hold_tau_requirement_s:
+                hold_window_satisfied = True
 
-        if tau_now > REVERSAL_ENABLE_TAU_S:
+        if tau_now > reversal_enable_tau_s:
             prev_time = float(t_now)
             continue
 
