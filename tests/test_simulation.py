@@ -302,6 +302,52 @@ def test_classify_event_standard_cat_delay_is_not_reversal_trigger():
         assert event_detail is None
 
 
+def test_classify_event_manual_intruder_delay_waits_before_reversing():
+    tgo = 25.0
+    dt = 0.2
+
+    times = np.arange(0.0, tgo + 1e-9, dt)
+    _, vs_pl = vs_time_series(
+        tgo,
+        dt,
+        PL_DELAY_MEAN_S,
+        PL_ACCEL_G,
+        PL_VS_FPM,
+        sense=+1,
+        cap_fpm=PL_VS_CAP_FPM,
+    )
+    _, vs_ca = vs_time_series(
+        tgo,
+        dt,
+        5.0,
+        0.25,
+        CAT_INIT_VS_FPM,
+        sense=-1,
+        cap_fpm=CAT_CAP_INIT_FPM,
+    )
+
+    z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
+    z_ca = integrate_altitude_from_vs(times, vs_ca, 900.0)
+
+    eventtype, _, _, _, event_detail = classify_event(
+        times=times,
+        z_pl=z_pl,
+        z_ca=z_ca,
+        vs_pl=vs_pl,
+        vs_ca=vs_ca,
+        tgo=tgo,
+        alim_ft=400.0,
+        margin_ft=100.0,
+        sense_chosen_cat=-1,
+        sense_exec_cat=-1,
+        manual_case=True,
+    )
+
+    assert eventtype in {"NONE", "STRENGTHEN"}
+    if eventtype == "STRENGTHEN":
+        assert event_detail in {None, "EXIGENT_STRENGTHEN"}
+
+
 def test_classify_event_strengthen_fires_on_predicted_miss_when_time_allows():
     tgo = 25.0
     dt = 1.0
@@ -336,7 +382,7 @@ def test_classify_event_strengthen_fires_on_predicted_miss_when_time_allows():
 
     assert eventtype == "REVERSE"
     assert event_detail == "Exigent wrong-sense"
-    assert np.isclose(t_detect, 1.0)
+    assert np.isclose(t_detect, 4.0)
 
 
 def test_classify_event_strengthen_triggers_even_when_time_short():
@@ -373,7 +419,7 @@ def test_classify_event_strengthen_triggers_even_when_time_short():
 
     assert eventtype == "REVERSE"
     assert event_detail == "Exigent wrong-sense"
-    assert np.isclose(t_detect, 1.0)
+    assert np.isclose(t_detect, 4.0)
 
 
 def test_classify_event_no_response_triggers_exigent_strengthen():
@@ -381,30 +427,37 @@ def test_classify_event_no_response_triggers_exigent_strengthen():
     dt = 1.0
 
     times = np.arange(0.0, tgo + 1e-9, dt)
-    vs_pl = np.zeros_like(times)
-    vs_ca = np.full_like(times, -200.0)
-    vs_ca[times >= 8.0] = 1200.0
+    vs_pl = np.full_like(times, 70.0)
+    vs_ca = np.zeros_like(times)
+    vs_ca[times >= 7.0] = 60.0
 
     z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
-    z_ca = integrate_altitude_from_vs(times, vs_ca, 900.0)
+    z_ca = integrate_altitude_from_vs(times, vs_ca, 2000.0)
 
-    eventtype, _, _, t_detect, event_detail = classify_event(
-        times=times,
-        z_pl=z_pl,
-        z_ca=z_ca,
-        vs_pl=vs_pl,
-        vs_ca=vs_ca,
-        tgo=tgo,
-        alim_ft=400.0,
-        margin_ft=100.0,
-        sense_chosen_cat=+1,
-        sense_exec_cat=+1,
-        manual_case=True,
-    )
+    import simulation as sim_mod
 
-    assert eventtype == "REVERSE"
-    assert event_detail == "Exigent wrong-sense"
-    assert np.isclose(t_detect, 1.0)
+    orig_pad = sim_mod.STRENGTHEN_PAD_FT
+    try:
+        sim_mod.STRENGTHEN_PAD_FT = -1e6
+        eventtype, _, _, t_detect, event_detail = classify_event(
+            times=times,
+            z_pl=z_pl,
+            z_ca=z_ca,
+            vs_pl=vs_pl,
+            vs_ca=vs_ca,
+            tgo=tgo,
+            alim_ft=400.0,
+            margin_ft=100.0,
+            sense_chosen_cat=+1,
+            sense_exec_cat=+1,
+            manual_case=True,
+        )
+    finally:
+        sim_mod.STRENGTHEN_PAD_FT = orig_pad
+
+    assert eventtype == "STRENGTHEN"
+    assert event_detail == "EXIGENT_STRENGTHEN"
+    assert np.isclose(t_detect, 8.0)
 
 
 def test_classify_event_same_sense_improvement_hold_defers_reversal():

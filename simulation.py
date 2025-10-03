@@ -508,9 +508,12 @@ def classify_event(
     t_ca_move = first_move_time(times, vs_ca)
     response_start = max(t_pl_move, t_ca_move)
     earliest_move = min(t_pl_move, t_ca_move)
-    monitor_start = float(
-        max(0.0, min(response_start, earliest_move + REVERSAL_MONITOR_DELAY_S))
-    )
+    if math.isclose(response_start, earliest_move, abs_tol=1e-6):
+        monitor_start = float(max(0.0, response_start))
+    else:
+        monitor_start = float(
+            max(0.0, max(response_start, earliest_move + REVERSAL_MONITOR_DELAY_S))
+        )
 
     event_detail: Optional[str] = None
     t_detect = float(times[-1])
@@ -550,7 +553,11 @@ def classify_event(
                 tau_now = math.inf
 
         if manual_case and sense_chosen_cat == sense_exec_cat and not no_response_checked:
-            if approaching and t_now >= NO_RESPONSE_ESCALATION_S:
+            no_response_gate = max(
+                NO_RESPONSE_ESCALATION_S,
+                response_start + REVERSAL_MONITOR_DELAY_S,
+            )
+            if approaching and t_now >= no_response_gate:
                 no_response_checked = True
                 vs_toward_command = float(vs_ca[idx] * sense_chosen_cat)
                 if vs_toward_command <= NO_RESPONSE_VS_THRESH_FPM:
@@ -657,6 +664,12 @@ def classify_event(
             continue
 
         if not same_sense:
+            if (
+                sense_flown == 0
+                and t_now < response_start + REVERSAL_MONITOR_DELAY_S
+            ):
+                prev_time = float(t_now)
+                continue
             if sense_flown == 0:
                 event_detail = "Slow response"
             else:
