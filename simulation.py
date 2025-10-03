@@ -47,6 +47,9 @@ REVERSAL_GUARD_TGO_S = 12.0
 # Flexible margin for reporting ALIM breaches at CPA (ft)
 ALIM_FLEX_FT = 25.0
 
+# Predicted-miss pad for triggering strengthen early (ft)
+STRENGTHEN_PAD_FT = 150.0
+
 
 def sanitize_tgo_bounds(
     tgo_min_s: Optional[float], tgo_max_s: Optional[float]
@@ -428,11 +431,22 @@ def classify_event(
             continue
 
         t_rem = max(0.0, tgo - float(t_now))
-        guard_open = t_rem <= REVERSAL_GUARD_TGO_S
-        if not guard_open:
+        # Guard window only
+        if t_rem > REVERSAL_GUARD_TGO_S:
             continue
-
+            
         pred_miss = abs(sep_now + rel_now * t_rem)
+        # Must be same sense as executed CAT
+       
+        if sense_chosen_cat != sense_exec_cat:
+            continue
+        # Strengthen if predicted miss is close to ALIM (with pad)
+        strengthen_threshold = alim_ft + STRENGTHEN_PAD_FT
+        if pred_miss <= strengthen_threshold:
+            t_strengthen = float(t_now)
+            return ("STRENGTHEN", minsep, sep_cpa, t_strengthen, None)
+            
+        #Otherwise apply the riginal thin-pred gate
         thin_pred = pred_miss < alim_ft
         if not thin_pred:
             continue
@@ -446,13 +460,6 @@ def classify_event(
         if cat_response_mag < 0.7 * CAT_INIT_VS_FPM:
             reversal_reason = "Slow response"
             return ("REVERSE", minsep, sep_cpa, t_detect, reversal_reason)
-
-    strengthen_threshold = alim_ft - margin_ft
-    breach_mask = np.logical_and(times >= response_start, sep < strengthen_threshold)
-    breach_idx = np.where(breach_mask)[0]
-    if breach_idx.size > 0:
-        t_strengthen = float(times[breach_idx[0]])
-        return ("STRENGTHEN", minsep, sep_cpa, t_strengthen, None)
 
     return ("NONE", minsep, sep_cpa, t_detect, None)
 

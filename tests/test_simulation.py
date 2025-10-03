@@ -209,6 +209,77 @@ def test_classify_event_standard_cat_delay_is_not_reversal_trigger():
     assert reversal_reason is None
 
 
+def test_classify_event_strengthen_fires_on_predicted_miss_when_time_allows():
+    tgo = 25.0
+    dt = 1.0
+
+    times = np.arange(0.0, tgo + 1e-9, dt)
+    vs_pl = np.zeros_like(times)
+    vs_ca = np.zeros_like(times)
+
+    for idx, t_now in enumerate(times):
+        if t_now < 3.0:
+            vs_ca[idx] = -200.0
+        elif t_now < 8.0:
+            vs_ca[idx] = -200.0 - 200.0 * (t_now - 3.0)
+        else:
+            vs_ca[idx] = -1200.0
+
+    z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
+    z_ca = integrate_altitude_from_vs(times, vs_ca, 900.0)
+
+    eventtype, _, _, t_detect, _ = classify_event(
+        times=times,
+        z_pl=z_pl,
+        z_ca=z_ca,
+        vs_pl=vs_pl,
+        vs_ca=vs_ca,
+        tgo=tgo,
+        alim_ft=400.0,
+        margin_ft=100.0,
+        sense_chosen_cat=+1,
+        sense_exec_cat=+1,
+    )
+
+    assert eventtype == "STRENGTHEN"
+    assert np.isclose(t_detect, 7.0)
+
+
+def test_classify_event_strengthen_suppressed_when_time_short():
+    tgo = 15.0
+    dt = 1.0
+
+    times = np.arange(0.0, tgo + 1e-9, dt)
+    vs_pl = np.zeros_like(times)
+    vs_ca = np.zeros_like(times)
+
+    for idx, t_now in enumerate(times):
+        if t_now < 3.0:
+            vs_ca[idx] = -200.0
+        elif t_now < 8.0:
+            vs_ca[idx] = -200.0 - 200.0 * (t_now - 3.0)
+        else:
+            vs_ca[idx] = -1200.0
+
+    z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
+    z_ca = integrate_altitude_from_vs(times, vs_ca, 900.0)
+
+    eventtype, _, _, _, _ = classify_event(
+        times=times,
+        z_pl=z_pl,
+        z_ca=z_ca,
+        vs_pl=vs_pl,
+        vs_ca=vs_ca,
+        tgo=tgo,
+        alim_ft=400.0,
+        margin_ft=100.0,
+        sense_chosen_cat=+1,
+        sense_exec_cat=+1,
+    )
+
+    assert eventtype != "STRENGTHEN"
+
+
 def test_run_batch_deterministic_seed():
     df1 = run_batch(
         runs=20,
