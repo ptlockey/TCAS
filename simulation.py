@@ -42,7 +42,7 @@ TGO_MAX_S = 35.0
 ALIM_MARGIN_FT = 100.0
 
 # Time-to-go guard before reversal monitoring can act (s)
-REVERSAL_GUARD_TGO_S = 12.0
+REVERSAL_GUARD_TAU_S = 12.0
 
 # Flexible margin for reporting ALIM breaches at CPA (ft)
 ALIM_FLEX_FT = 25.0
@@ -51,13 +51,15 @@ ALIM_FLEX_FT = 25.0
 STRENGTHEN_PAD_FT = 150.0
 
 # Subsequent-manoeuvre tuning
-EXIGENT_STRENGTHEN_TGO_S = 8.0
+EXIGENT_STRENGTHEN_TAU_S = 6.0
 NO_RESPONSE_ESCALATION_S = 3.0
 NO_RESPONSE_VS_THRESH_FPM = 100.0
 
 # Reversal management
 REVERSAL_INTERLOCK_LOOKBACK_S = 1.8
-REVERSAL_INTERLOCK_TGO_MIN_S = 18.0
+REVERSAL_SHORT_TAU_S = 8.0
+REVERSAL_IMPROVEMENT_HOLD_S = 1.5
+REVERSAL_IMPROVEMENT_DISABLE_TAU_S = 4.0
 PREDICTED_MISS_IMPROVEMENT_TOL_FT = 5.0
 
 
@@ -432,12 +434,23 @@ def classify_event(
     rel_rate = (vs_ca - vs_pl) / 60.0
 
     no_response_checked = False
+    improvement_timer_s = 0.0
+    prev_time = float(times[0]) if times.size else 0.0
 
     for idx, t_now in enumerate(times):
         rel_now = float(rel_rate[idx])
+        sep_now = float(sep[idx])
+        approaching = rel_now < 0
+        tau_now = math.inf
+        if approaching:
+            closure = -rel_now
+            if closure > 1e-6:
+                tau_now = sep_now / closure
+            else:
+                tau_now = math.inf
 
         if manual_case and sense_chosen_cat == sense_exec_cat and not no_response_checked:
-            if rel_now < 0 and t_now >= NO_RESPONSE_ESCALATION_S:
+            if approaching and t_now >= NO_RESPONSE_ESCALATION_S:
                 no_response_checked = True
                 vs_toward_command = float(vs_ca[idx] * sense_chosen_cat)
                 if vs_toward_command <= NO_RESPONSE_VS_THRESH_FPM:
@@ -445,21 +458,19 @@ def classify_event(
                     return ("STRENGTHEN", minsep, sep_cpa, t_strengthen, "EXIGENT_STRENGTHEN")
 
         if t_now < response_start:
+            prev_time = float(t_now)
             continue
 
-        sep_now = float(sep[idx])
-        approaching = rel_now < 0
         if not approaching:
+            prev_time = float(t_now)
             continue
 
         vs_toward_command = float(vs_ca[idx] * sense_chosen_cat)
 
-        t_rem = max(0.0, tgo - float(t_now))
-        # Guard window only
-        if t_rem > REVERSAL_GUARD_TGO_S:
-            continue
-
-        pred_miss = abs(sep_now + rel_now * t_rem)
+        if math.isinf(tau_now):
+            pred_miss = float("inf")
+        else:
+            pred_miss = abs(sep_now + rel_now * tau_now)
         same_sense = sense_chosen_cat == sense_exec_cat
         # Strengthen if predicted miss is close to ALIM (with pad)
         strengthen_threshold = alim_ft + STRENGTHEN_PAD_FT
@@ -467,9 +478,25 @@ def classify_event(
             t_strengthen = float(t_now)
             return ("STRENGTHEN", minsep, sep_cpa, t_strengthen, None)
 
+        if (
+            same_sense
+            and tau_now <= EXIGENT_STRENGTHEN_TAU_S
+            and vs_toward_command <= NO_RESPONSE_VS_THRESH_FPM
+        ):
+            t_strengthen = float(t_now)
+            return (
+                "STRENGTHEN",
+                minsep,
+                sep_cpa,
+                t_strengthen,
+                "EXIGENT_STRENGTHEN",
+            )
+
         #Otherwise apply the riginal thin-pred gate
         thin_pred = pred_miss < alim_ft
         if not thin_pred:
+            improvement_timer_s = 0.0
+            prev_time = float(t_now)
             continue
 
         t_detect = float(t_now)
@@ -477,8 +504,11 @@ def classify_event(
         if t_lb < t_now:
             sep_lb = float(np.interp(t_lb, times, sep))
             rel_lb = float(np.interp(t_lb, times, rel_rate))
-            t_rem_lb = max(0.0, tgo - t_lb)
-            pred_miss_lb = abs(sep_lb + rel_lb * t_rem_lb)
+            if rel_lb < -1e-6:
+                tau_lb = sep_lb / -rel_lb
+                pred_miss_lb = abs(sep_lb + rel_lb * tau_lb)
+            else:
+                pred_miss_lb = abs(sep_lb)
         else:
             pred_miss_lb = pred_miss
 
@@ -488,7 +518,30 @@ def classify_event(
         achieved_vs = max(0.0, vs_toward_exec)
         enough_vs = achieved_vs >= 0.7 * CAT_INIT_VS_FPM
 
-        if same_sense and t_rem >= REVERSAL_INTERLOCK_TGO_MIN_S and improving and enough_vs:
+        dt_sample = float(t_now - prev_time) if idx > 0 else 0.0
+        if (
+            same_sense
+            and improving
+            and enough_vs
+            and tau_now > REVERSAL_IMPROVEMENT_DISABLE_TAU_S
+        ):
+            improvement_timer_s += dt_sample
+        else:
+            improvement_timer_s = 0.0
+
+        if tau_now > REVERSAL_GUARD_TAU_S:
+            prev_time = float(t_now)
+            continue
+
+        if (
+            same_sense
+            and improvement_timer_s >= REVERSAL_IMPROVEMENT_HOLD_S
+        ):
+            prev_time = float(t_now)
+            continue
+
+        if tau_now > REVERSAL_SHORT_TAU_S:
+            prev_time = float(t_now)
             continue
 
         if not same_sense:
@@ -550,7 +603,7 @@ def apply_second_phase(
         cat_accel_eff = cat_accel_g
         cat_vs_eff = cat_vs_strength
         cat_cap_eff = cat_cap
-        exigent_active = force_exigent or (t_rem <= EXIGENT_STRENGTHEN_TGO_S)
+        exigent_active = force_exigent or (t_rem <= EXIGENT_STRENGTHEN_TAU_S)
 
         if canonical_mode in {"compliant", "apfd"}:
             cat_accel_eff = max(cat_accel_eff, 0.35)
