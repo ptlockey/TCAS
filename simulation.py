@@ -682,6 +682,68 @@ def classify_event(
             event_detail = "Opposite sense"
             return ("REVERSE", minsep, sep_cpa, t_detect, event_detail)
 
+        # Same-sense thin prediction: compare projected CPA for continuing vs reversing.
+        t_remaining = float(times[-1] - t_now)
+        times_future = times[idx:]
+        z_pl_future = z_pl[idx:]
+        if t_remaining > 1e-6 and times_future.size >= 2:
+            dt_future = float(np.min(np.diff(times_future)))
+            if dt_future <= 1e-6 and times.size >= 2:
+                dt_future = float(max(1e-3, np.min(np.diff(times))))
+            dt_future = float(max(1e-3, dt_future))
+
+            z_ca_now = float(z_ca[idx])
+            vs_ca_now = float(vs_ca[idx])
+
+            sense_current = sense_flown
+            target_mag = float(
+                min(
+                    max(abs(vs_ca_now), CAT_INIT_VS_FPM),
+                    CAT_CAP_INIT_FPM,
+                )
+            )
+            accel_proj = 0.25 if manual_case else 0.35
+
+            t_rel, vs_ca_continue = vs_time_series(
+                t_remaining,
+                dt_future,
+                0.0,
+                accel_proj,
+                target_mag,
+                sense=sense_current,
+                cap_fpm=CAT_CAP_INIT_FPM,
+                vs0_fpm=vs_ca_now,
+            )
+            _, vs_ca_reverse = vs_time_series(
+                t_remaining,
+                dt_future,
+                0.0,
+                accel_proj,
+                target_mag,
+                sense=-sense_current,
+                cap_fpm=CAT_CAP_INIT_FPM,
+                vs0_fpm=vs_ca_now,
+            )
+
+            z_ca_continue = integrate_altitude_from_vs(t_rel, vs_ca_continue, z_ca_now)
+            z_ca_reverse = integrate_altitude_from_vs(t_rel, vs_ca_reverse, z_ca_now)
+
+            times_abs = t_now + t_rel
+            z_pl_interp = np.interp(times_abs, times_future, z_pl_future)
+
+            sep_continue = np.abs(z_pl_interp - z_ca_continue)
+            sep_reverse = np.abs(z_pl_interp - z_ca_reverse)
+
+            cpa_continue = float(np.min(sep_continue))
+            cpa_reverse = float(np.min(sep_reverse))
+
+            reverse_alim_ok = cpa_reverse >= (alim_ft + margin_ft)
+            reverse_better = cpa_reverse > cpa_continue + 1e-3
+
+            if not (reverse_alim_ok or reverse_better):
+                prev_time = float(t_now)
+                continue
+
         if enough_vs:
             event_detail = "Geometry shortfall"
         else:
