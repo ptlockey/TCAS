@@ -766,6 +766,8 @@ def apply_second_phase(
     pl_vs0: float,
     cat_vs0: float,
     t_classify: float,
+    z_pl_t2: float,
+    z_cat_t2: float,
     pl_delay: float = PL_DELAY_MEAN_S,
     pl_accel_g: float = PL_ACCEL_G,
     pl_cap: float = PL_VS_CAP_FPM,
@@ -811,14 +813,8 @@ def apply_second_phase(
 
     vs_pl_now = float(np.interp(t2_issue, times, vs_pl))
     vs_ca_now = float(np.interp(t2_issue, times, vs_ca))
-
-    new_sense_pl = sense_pl
-    new_sense_cat_exec = sense_cat_exec
-    new_sense_cat_cmd = sense_cat_cmd
-    if eventtype == "REVERSE":
-        new_sense_pl = -sense_pl
-        new_sense_cat_exec = -sense_cat_exec
-        new_sense_cat_cmd = -sense_cat_cmd
+    z_pl_now = float(z_pl_t2)
+    z_ca_now = float(z_cat_t2)
 
     mode_key = (cat_mode or "").lower().strip()
     canonical_mode = mode_key.replace(" ", "").replace("/", "")
@@ -849,26 +845,77 @@ def apply_second_phase(
         cat_vs_eff = cat_vs_strength
         cat_cap_eff = cat_cap
 
-    t2_rel, vs_pl_cont = vs_time_series(
-        t_rem,
-        dt,
-        pl_delay,
-        pl_accel_g,
-        pl_cap,
-        sense=new_sense_pl,
-        cap_fpm=pl_cap,
-        vs0_fpm=vs_pl_now,
-    )
-    _, vs_ca_cont = vs_time_series(
-        t_rem,
-        dt,
-        cat_delay,
-        cat_accel_eff,
-        cat_vs_eff,
-        sense=new_sense_cat_exec,
-        cap_fpm=cat_cap_eff,
-        vs0_fpm=vs_ca_now,
-    )
+    if eventtype == "REVERSE":
+        candidate_configs = [
+            {
+                "label": "flip",
+                "sense_pl": -sense_pl,
+                "sense_cat_exec": -sense_cat_exec,
+                "sense_cat_cmd": -sense_cat_cmd,
+            },
+            {
+                "label": "keep",
+                "sense_pl": sense_pl,
+                "sense_cat_exec": sense_cat_exec,
+                "sense_cat_cmd": sense_cat_cmd,
+            },
+        ]
+    else:
+        candidate_configs = [
+            {
+                "label": "default",
+                "sense_pl": sense_pl,
+                "sense_cat_exec": sense_cat_exec,
+                "sense_cat_cmd": sense_cat_cmd,
+            }
+        ]
+
+    for cfg in candidate_configs:
+        t_rel, vs_pl_candidate = vs_time_series(
+            t_rem,
+            dt,
+            pl_delay,
+            pl_accel_g,
+            pl_cap,
+            sense=cfg["sense_pl"],
+            cap_fpm=pl_cap,
+            vs0_fpm=vs_pl_now,
+        )
+        _, vs_ca_candidate = vs_time_series(
+            t_rem,
+            dt,
+            cat_delay,
+            cat_accel_eff,
+            cat_vs_eff,
+            sense=cfg["sense_cat_exec"],
+            cap_fpm=cat_cap_eff,
+            vs0_fpm=vs_ca_now,
+        )
+        z_pl_candidate = integrate_altitude_from_vs(t_rel, vs_pl_candidate, z_pl_now)
+        z_ca_candidate = integrate_altitude_from_vs(t_rel, vs_ca_candidate, z_ca_now)
+        sep_candidate = np.abs(z_pl_candidate - z_ca_candidate)
+        cfg["cpa_sep"] = float(np.min(sep_candidate))
+        cfg["times_rel"] = t_rel
+        cfg["vs_pl_profile"] = vs_pl_candidate
+        cfg["vs_ca_profile"] = vs_ca_candidate
+
+    if eventtype == "REVERSE":
+        flip_cfg = next(cfg for cfg in candidate_configs if cfg["label"] == "flip")
+        keep_cfg = next(cfg for cfg in candidate_configs if cfg["label"] == "keep")
+        if flip_cfg["cpa_sep"] + 1e-6 < keep_cfg["cpa_sep"]:
+            best_cfg = keep_cfg
+        else:
+            best_cfg = flip_cfg
+    else:
+        best_cfg = candidate_configs[0]
+
+    new_sense_pl = int(best_cfg["sense_pl"])
+    new_sense_cat_exec = int(best_cfg["sense_cat_exec"])
+    new_sense_cat_cmd = int(best_cfg["sense_cat_cmd"])
+
+    t2_rel = best_cfg["times_rel"]
+    vs_pl_cont = best_cfg["vs_pl_profile"]
+    vs_ca_cont = best_cfg["vs_ca_profile"]
 
     prefix_mask = times < (t2_issue - 1e-9)
     times_prefix = times[prefix_mask]
@@ -1226,6 +1273,12 @@ def run_batch(
 
             force_exigent = bool(event_detail == "EXIGENT_STRENGTHEN")
             second_phase_cat_delay = 0.9 if cat_is_apfd else 2.5
+            decision_latency = float(np.clip(rng.normal(1.0, 0.2), 0.6, 1.4))
+            latency = float(np.clip(decision_latency, 0.6, 1.4))
+            t2_issue_est = float(max(0.0, min(tgo, t_detect + latency)))
+            z_pl_t2 = float(np.interp(t2_issue_est, current_times, current_z_pl))
+            z_cat_t2 = float(np.interp(t2_issue_est, current_times, current_z_ca))
+
             (
                 times2,
                 vs_pl2,
@@ -1247,6 +1300,8 @@ def run_batch(
                 pl_vs0=vz0_pl,
                 cat_vs0=vz0_cat,
                 t_classify=t_detect,
+                z_pl_t2=z_pl_t2,
+                z_cat_t2=z_cat_t2,
                 pl_delay=pl_delay,
                 pl_accel_g=PL_ACCEL_G,
                 pl_cap=PL_VS_CAP_FPM,
@@ -1254,7 +1309,7 @@ def run_batch(
                 cat_accel_g=0.35,
                 cat_vs_strength=CAT_STRENGTH_FPM,
                 cat_cap=CAT_CAP_STRENGTH_FPM,
-                decision_latency_s=float(np.clip(rng.normal(1.0, 0.2), 0.6, 1.4)),
+                decision_latency_s=decision_latency,
                 cat_mode=mode,
                 force_exigent=force_exigent,
             )
