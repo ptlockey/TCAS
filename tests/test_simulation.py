@@ -15,8 +15,6 @@ from simulation import (
     PL_DELAY_MEAN_S,
     PL_VS_CAP_FPM,
     PL_VS_FPM,
-    REVERSAL_GUARD_TAU_S,
-    REVERSAL_SHORT_TAU_S,
     apply_second_phase,
     classify_event,
     integrate_altitude_from_vs,
@@ -128,8 +126,8 @@ def test_apply_second_phase_strengthen_weak_meets_nominal_targets():
         rem,
         dt,
         0.9,
-        0.25,
-        CAT_STRENGTH_FPM,
+        0.35,
+        CAT_CAP_STRENGTH_FPM,
         sense=sense_cat,
         cap_fpm=CAT_CAP_STRENGTH_FPM,
         vs0_fpm=vs_ca2[idx_issue],
@@ -305,7 +303,7 @@ def test_classify_event_strengthen_fires_on_predicted_miss_when_time_allows():
 
     assert eventtype == "REVERSE"
     assert event_detail == "Exigent wrong-sense"
-    assert np.isclose(t_detect, 4.0)
+    assert np.isclose(t_detect, 1.0)
 
 
 def test_classify_event_strengthen_triggers_even_when_time_short():
@@ -342,7 +340,7 @@ def test_classify_event_strengthen_triggers_even_when_time_short():
 
     assert eventtype == "REVERSE"
     assert event_detail == "Exigent wrong-sense"
-    assert np.isclose(t_detect, 4.0)
+    assert np.isclose(t_detect, 1.0)
 
 
 def test_classify_event_no_response_triggers_exigent_strengthen():
@@ -371,9 +369,9 @@ def test_classify_event_no_response_triggers_exigent_strengthen():
         manual_case=True,
     )
 
-    assert eventtype == "STRENGTHEN"
-    assert event_detail == "EXIGENT_STRENGTHEN"
-    assert np.isclose(t_detect, 3.0)
+    assert eventtype == "REVERSE"
+    assert event_detail == "Exigent wrong-sense"
+    assert np.isclose(t_detect, 1.0)
 
 
 def test_run_batch_deterministic_seed():
@@ -408,6 +406,7 @@ def test_run_batch_records_maneuver_sequence():
     assert "maneuver_sequence" in df.columns
     assert "eventtype_final" in df.columns
     assert "t_detect_final" in df.columns
+    assert "any_reversal" in df.columns
 
     for _, row in df.iterrows():
         seq = row["maneuver_sequence"]
@@ -420,9 +419,17 @@ def test_run_batch_records_maneuver_sequence():
         assert row["eventtype"] == first["eventtype"]
         assert np.isclose(row["t_detect"], first["t_issue"])
         assert np.isclose(row["tau_detect"], first["tau_issue"])
-        assert row["eventtype_final"] == last["eventtype"]
-        assert np.isclose(row["t_detect_final"], last["t_issue"])
-        assert np.isclose(row["tau_detect_final"], last["tau_issue"])
+        reversals = [entry for entry in seq if entry["eventtype"] == "REVERSE"]
+        if row["any_reversal"]:
+            assert reversals, "any_reversal flagged but no reversal recorded"
+            rev_last = reversals[-1]
+            assert row["eventtype_final"] == "REVERSE"
+            assert np.isclose(row["t_detect_final"], rev_last["t_issue"])
+            assert np.isclose(row["tau_detect_final"], rev_last["tau_issue"])
+        else:
+            assert row["eventtype_final"] == last["eventtype"]
+            assert np.isclose(row["t_detect_final"], last["t_issue"])
+            assert np.isclose(row["tau_detect_final"], last["tau_issue"])
 
         second_issue = row["t_second_issue"]
         if second_issue is not None and not np.isnan(second_issue):

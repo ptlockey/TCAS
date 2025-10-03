@@ -41,22 +41,22 @@ TGO_MAX_S = 35.0
 # ALIM margin for classification conservatism (ft)
 ALIM_MARGIN_FT = 100.0
 
-# Time-to-go guard before reversal monitoring can act (s)
-REVERSAL_GUARD_TAU_S = 12.0
+# Reversal monitoring
+REVERSAL_MONITOR_DELAY_S = 1.0
+REVERSAL_ENABLE_TAU_S = 18.0
 
 # Predicted-miss pad for triggering strengthen early (ft)
 STRENGTHEN_PAD_FT = 150.0
 
 # Subsequent-manoeuvre tuning
-EXIGENT_STRENGTHEN_TAU_S = 6.0
+EXIGENT_STRENGTHEN_TAU_S = 20.0
 NO_RESPONSE_ESCALATION_S = 3.0
 NO_RESPONSE_VS_THRESH_FPM = 100.0
 
 # Reversal management
 REVERSAL_INTERLOCK_LOOKBACK_S = 1.8
-REVERSAL_SHORT_TAU_S = 8.0
-REVERSAL_IMPROVEMENT_HOLD_S = 1.5
-REVERSAL_IMPROVEMENT_DISABLE_TAU_S = 4.0
+REVERSAL_IMPROVEMENT_HOLD_S = 1.6
+REVERSAL_HOLD_DISABLE_TAU_S = 18.0
 PREDICTED_MISS_IMPROVEMENT_TOL_FT = 5.0
 
 # Safeguard for repeated manoeuvre phases
@@ -430,6 +430,10 @@ def classify_event(
     t_pl_move = first_move_time(times, vs_pl)
     t_ca_move = first_move_time(times, vs_ca)
     response_start = max(t_pl_move, t_ca_move)
+    earliest_move = min(t_pl_move, t_ca_move)
+    monitor_start = float(
+        max(0.0, min(response_start, earliest_move + REVERSAL_MONITOR_DELAY_S))
+    )
 
     event_detail: Optional[str] = None
     t_detect = float(times[-1])
@@ -460,7 +464,7 @@ def classify_event(
                     t_strengthen = float(t_now)
                     return ("STRENGTHEN", minsep, sep_cpa, t_strengthen, "EXIGENT_STRENGTHEN")
 
-        if t_now < response_start:
+        if t_now < monitor_start:
             prev_time = float(t_now)
             continue
 
@@ -518,7 +522,7 @@ def classify_event(
             continue
 
         t_detect = float(t_now)
-        t_lb = max(response_start, t_now - REVERSAL_INTERLOCK_LOOKBACK_S)
+        t_lb = max(monitor_start, t_now - REVERSAL_INTERLOCK_LOOKBACK_S)
         if t_lb < t_now:
             sep_lb = float(np.interp(t_lb, times, sep))
             rel_lb = float(np.interp(t_lb, times, rel_rate))
@@ -540,24 +544,22 @@ def classify_event(
             same_sense
             and improving
             and enough_vs
-            and tau_now > REVERSAL_IMPROVEMENT_DISABLE_TAU_S
+            and tau_now >= REVERSAL_HOLD_DISABLE_TAU_S
         ):
             improvement_timer_s += dt_sample
         else:
             improvement_timer_s = 0.0
 
-        if tau_now > REVERSAL_GUARD_TAU_S:
+        if tau_now > REVERSAL_ENABLE_TAU_S:
             prev_time = float(t_now)
             continue
 
-        if (
+        hold_active = (
             same_sense
+            and tau_now >= REVERSAL_HOLD_DISABLE_TAU_S
             and improvement_timer_s >= REVERSAL_IMPROVEMENT_HOLD_S
-        ):
-            prev_time = float(t_now)
-            continue
-
-        if tau_now > REVERSAL_SHORT_TAU_S:
+        )
+        if hold_active:
             prev_time = float(t_now)
             continue
 
@@ -921,6 +923,10 @@ def run_batch(
         final_tau_detect: Optional[float] = None
         t_second_issue: Optional[float] = None
         tau_second_issue_s: Optional[float] = None
+        reversal_observed = False
+        reversal_detail: Optional[str] = None
+        reversal_t_detect: Optional[float] = None
+        reversal_tau_detect: Optional[float] = None
 
         for phase in range(MAX_MANEUVER_PHASES):
             if current_times.size == 0:
@@ -967,15 +973,20 @@ def run_batch(
             final_t_detect = float(t_detect)
             final_tau_detect = float(tau_detect)
 
-            maneuver_sequence.append(
-                dict(
-                    phase=phase + 1,
-                    eventtype=str(eventtype),
-                    event_detail=event_detail,
-                    t_issue=float(t_detect),
-                    tau_issue=float(tau_detect),
-                )
+            record = dict(
+                phase=phase + 1,
+                eventtype=str(eventtype),
+                event_detail=event_detail,
+                t_issue=float(t_detect),
+                tau_issue=float(tau_detect),
             )
+            maneuver_sequence.append(record)
+
+            if eventtype == "REVERSE":
+                reversal_observed = True
+                reversal_detail = event_detail
+                reversal_t_detect = float(t_detect)
+                reversal_tau_detect = float(tau_detect)
 
             if eventtype not in ("STRENGTHEN", "REVERSE"):
                 break
@@ -1037,6 +1048,11 @@ def run_batch(
             eventtype_initial = "NONE"
         if final_eventtype is None:
             final_eventtype = eventtype_initial
+        if reversal_observed and final_eventtype != "REVERSE":
+            final_eventtype = "REVERSE"
+            final_event_detail = reversal_detail
+            final_t_detect = reversal_t_detect
+            final_tau_detect = reversal_tau_detect
         if event_detail_initial is None:
             event_detail_initial = None
         if final_event_detail is None:
@@ -1129,6 +1145,7 @@ def run_batch(
                 t_detect_final=final_t_detect,
                 tau_detect_final=final_tau_detect,
                 maneuver_sequence=tuple(maneuver_sequence),
+                any_reversal=int(reversal_observed),
                 comp_label=comp_label,
                 CAT_is_APFD=int(cat_is_apfd),
                 residual_risk=residual_risk,
@@ -1158,8 +1175,15 @@ __all__ = [
     "TGO_MIN_S",
     "TGO_MAX_S",
     "ALIM_MARGIN_FT",
-    "REVERSAL_EVAL_DELAY_S",
-    "ALIM_FLEX_FT",
+    "REVERSAL_MONITOR_DELAY_S",
+    "REVERSAL_ENABLE_TAU_S",
+    "EXIGENT_STRENGTHEN_TAU_S",
+    "NO_RESPONSE_ESCALATION_S",
+    "NO_RESPONSE_VS_THRESH_FPM",
+    "REVERSAL_INTERLOCK_LOOKBACK_S",
+    "REVERSAL_IMPROVEMENT_HOLD_S",
+    "REVERSAL_HOLD_DISABLE_TAU_S",
+    "PREDICTED_MISS_IMPROVEMENT_TOL_FT",
     "ALIM_BANDS_FT",
     "MAX_MANEUVER_PHASES",
     # helpers
