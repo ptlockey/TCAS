@@ -664,16 +664,22 @@ def classify_event(
             continue
 
         if not same_sense:
-            if (
-                sense_flown == 0
-                and t_now < response_start + REVERSAL_MONITOR_DELAY_S
-            ):
+            if sense_flown == 0:
+                if t_now < response_start + REVERSAL_MONITOR_DELAY_S:
+                    prev_time = float(t_now)
+                    continue
+                if tau_now <= EXIGENT_STRENGTHEN_TAU_S:
+                    t_strengthen = float(t_now)
+                    return (
+                        "STRENGTHEN",
+                        minsep,
+                        sep_cpa,
+                        t_strengthen,
+                        "EXIGENT_STRENGTHEN",
+                    )
                 prev_time = float(t_now)
                 continue
-            if sense_flown == 0:
-                event_detail = "Slow response"
-            else:
-                event_detail = "Opposite sense"
+            event_detail = "Opposite sense"
             return ("REVERSE", minsep, sep_cpa, t_detect, event_detail)
 
         if enough_vs:
