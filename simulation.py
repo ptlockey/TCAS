@@ -62,6 +62,9 @@ REVERSAL_IMPROVEMENT_HOLD_S = 1.5
 REVERSAL_IMPROVEMENT_DISABLE_TAU_S = 4.0
 PREDICTED_MISS_IMPROVEMENT_TOL_FT = 5.0
 
+# Sense determination
+VS_SENSE_DEADBAND_FPM = 50.0
+
 
 def sanitize_tgo_bounds(
     tgo_min_s: Optional[float], tgo_max_s: Optional[float]
@@ -465,13 +468,28 @@ def classify_event(
             prev_time = float(t_now)
             continue
 
-        vs_toward_command = float(vs_ca[idx] * sense_chosen_cat)
+        vs_now = float(vs_ca[idx])
+        if abs(vs_now) <= VS_SENSE_DEADBAND_FPM:
+            sense_flown = 0
+        else:
+            sense_flown = 1 if vs_now > 0.0 else -1
+
+        vs_toward_command = float(vs_now * sense_chosen_cat)
+
+        wrong_sense = sense_flown != 0 and sense_flown != sense_chosen_cat
+
+        if wrong_sense:
+            t_detect = float(t_now)
+            event_detail = "Exigent wrong-sense"
+            return ("REVERSE", minsep, sep_cpa, t_detect, event_detail)
+
+        same_sense = sense_flown == sense_chosen_cat and sense_flown != 0
 
         if math.isinf(tau_now):
             pred_miss = float("inf")
         else:
             pred_miss = abs(sep_now + rel_now * tau_now)
-        same_sense = sense_chosen_cat == sense_exec_cat
+
         # Strengthen if predicted miss is close to ALIM (with pad)
         strengthen_threshold = alim_ft + STRENGTHEN_PAD_FT
         if same_sense and pred_miss <= strengthen_threshold:
@@ -514,8 +532,7 @@ def classify_event(
 
         improving = pred_miss > pred_miss_lb + PREDICTED_MISS_IMPROVEMENT_TOL_FT
 
-        vs_toward_exec = float(vs_ca[idx] * sense_exec_cat)
-        achieved_vs = max(0.0, vs_toward_exec)
+        achieved_vs = max(0.0, vs_toward_command) if same_sense else 0.0
         enough_vs = achieved_vs >= 0.7 * CAT_INIT_VS_FPM
 
         dt_sample = float(t_now - prev_time) if idx > 0 else 0.0
@@ -545,7 +562,10 @@ def classify_event(
             continue
 
         if not same_sense:
-            event_detail = "Opposite sense"
+            if sense_flown == 0:
+                event_detail = "Slow response"
+            else:
+                event_detail = "Opposite sense"
             return ("REVERSE", minsep, sep_cpa, t_detect, event_detail)
 
         if enough_vs:
