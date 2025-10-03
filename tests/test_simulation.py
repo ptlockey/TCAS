@@ -609,6 +609,43 @@ def test_classify_event_no_response_triggers_exigent_strengthen():
     assert np.isclose(t_detect, 8.0)
 
 
+def test_classify_event_reversal_not_selected_when_cpa_worsens():
+    tgo = 20.0
+    dt = 1.0
+
+    times = np.arange(0.0, tgo + 1e-9, dt)
+    vs_pl = np.full_like(times, 1000.0, dtype=float)
+    vs_ca = np.full_like(times, -300.0, dtype=float)
+
+    z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
+    z_ca = integrate_altitude_from_vs(times, vs_ca, -300.0)
+
+    import simulation as sim_mod
+
+    orig_pad = sim_mod.STRENGTHEN_PAD_FT
+    try:
+        sim_mod.STRENGTHEN_PAD_FT = -1e6
+        eventtype, _, _, _, event_detail = classify_event(
+            times=times,
+            z_pl=z_pl,
+            z_ca=z_ca,
+            vs_pl=vs_pl,
+            vs_ca=vs_ca,
+            tgo=tgo,
+            alim_ft=400.0,
+            margin_ft=100.0,
+            sense_chosen_cat=-1,
+            sense_exec_cat=-1,
+            manual_case=False,
+        )
+    finally:
+        sim_mod.STRENGTHEN_PAD_FT = orig_pad
+
+    assert eventtype in {"NONE", "STRENGTHEN"}
+    if eventtype == "STRENGTHEN":
+        assert event_detail in {None, "EXIGENT_STRENGTHEN"}
+
+
 def test_classify_event_same_sense_improvement_hold_defers_reversal():
     closure_fps = 20.0
     times = np.array([0.0, 0.4, 0.8, 1.2, 1.6, 2.0, 2.4, 2.8])
