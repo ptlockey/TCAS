@@ -431,17 +431,22 @@ def classify_event(
             continue
 
         t_rem = max(0.0, tgo - float(t_now))
-        pred_miss = abs(sep_now + rel_now * t_rem)
-
+        # Guard window only
         if t_rem > REVERSAL_GUARD_TGO_S:
-            if sense_chosen_cat != sense_exec_cat:
-                continue
-            strengthen_threshold = alim_ft + STRENGTHEN_PAD_FT
-            if pred_miss <= strengthen_threshold:
-                t_strengthen = float(t_now)
-                return ("STRENGTHEN", minsep, sep_cpa, t_strengthen, None)
             continue
-
+            
+        pred_miss = abs(sep_now + rel_now * t_rem)
+        # Must be same sense as executed CAT
+       
+        if sense_chosen_cat != sense_exec_cat:
+            continue
+        # Strengthen if predicted miss is close to ALIM (with pad)
+        strengthen_threshold = alim_ft + STRENGTHEN_PAD_FT
+        if pred_miss <= strengthen_threshold:
+            t_strengthen = float(t_now)
+            return ("STRENGTHEN", minsep, sep_cpa, t_strengthen, None)
+            
+        #Otherwise apply the riginal thin-pred gate
         thin_pred = pred_miss < alim_ft
         if not thin_pred:
             continue
