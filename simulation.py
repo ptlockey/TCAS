@@ -31,8 +31,8 @@ PL_IAS_KT       = 120.0
 # CAT parameters (v7.1-style)
 CAT_INIT_VS_FPM      = 1500.0
 CAT_STRENGTH_FPM     = 2500.0
-CAT_CAP_INIT_FPM     = 2000.0
-CAT_CAP_STRENGTH_FPM = 3000.0
+CAT_CAP_INIT_FPM     = 1600.0
+CAT_CAP_STRENGTH_FPM = 2600.0
 
 # RA timing window
 TGO_MIN_S = 15.0
@@ -337,7 +337,8 @@ def apply_non_compliance_to_cat(
         p_weak = max(0.0, min(1.0, p_weak * rng.uniform(0.7, 1.3)))
     u = rng.uniform()
     if u < p_opp:
-        return ("opposite-sense", -sense_cat, base_delay_s, base_accel_g, vs_fpm, cap_fpm)
+        compliant_accel = float(np.clip(base_accel_g, 0.20, 0.25))
+        return ("opposite-sense", -sense_cat, base_delay_s, compliant_accel, vs_fpm, cap_fpm)
     u -= p_opp
     if u < p_taonly:
         return ("no-response", sense_cat, base_delay_s, 0.0, 0.0, 0.0)
@@ -347,11 +348,12 @@ def apply_non_compliance_to_cat(
             "weak-compliance",
             sense_cat,
             base_delay_s + 1.0,
-            max(0.03, 0.6 * base_accel_g),
-            0.6 * vs_fpm,
-            0.6 * cap_fpm,
+            float(np.clip(rng.uniform(0.10, 0.18), 0.10, 0.18)),
+            float(np.clip(vs_fpm * rng.uniform(0.55, 0.75), 900.0, 1200.0)),
+            float(np.clip(cap_fpm * rng.uniform(0.55, 0.80), 900.0, 1300.0)),
         )
-    return ("compliant", sense_cat, base_delay_s, base_accel_g, vs_fpm, cap_fpm)
+    compliant_accel = float(np.clip(base_accel_g, 0.20, 0.25))
+    return ("compliant", sense_cat, base_delay_s, compliant_accel, vs_fpm, cap_fpm)
 
 
 # ------------------------- Event classification -------------------------
@@ -368,8 +370,8 @@ def classify_event(
     margin_ft: float,
     sense_chosen_cat: int,
     sense_exec_cat: int,
-) -> Tuple[str, float, float, float]:
-    """Return (event_label, minsep, sep@CPA, t_check)."""
+) -> Tuple[str, float, float, float, Optional[str]]:
+    """Return (event_label, minsep, sep@CPA, t_check, reversal_reason)."""
 
     sep = np.abs(z_ca - z_pl)
     minsep = float(np.min(sep))
@@ -379,6 +381,7 @@ def classify_event(
     t_ca_move = first_move_time(times, vs_ca)
     t_check = max(t_pl_move, t_ca_move) + 3.0
     mask = times >= t_check
+    reversal_reason: Optional[str] = None
 
     if np.any(mask):
         t_obs = times[mask]
@@ -391,13 +394,20 @@ def classify_event(
         pred_miss = abs(s_last + r_last * t_rem)
         approaching = r_last < 0
         thin_pred = pred_miss < (alim_ft - margin_ft)
-        if approaching and thin_pred and (sense_chosen_cat != sense_exec_cat):
-            return ("REVERSE", minsep, sep_cpa, float(t_obs[-1]))
+        if approaching and thin_pred:
+            if sense_chosen_cat != sense_exec_cat:
+                reversal_reason = "Opposite sense"
+                return ("REVERSE", minsep, sep_cpa, float(t_obs[-1]), reversal_reason)
+            cat_response_mag = float(np.max(np.abs(vs_ca[mask])))
+            response_delay = t_ca_move - t_pl_move
+            if (cat_response_mag < 0.7 * CAT_INIT_VS_FPM) or (response_delay > 2.0):
+                reversal_reason = "Slow response"
+                return ("REVERSE", minsep, sep_cpa, float(t_obs[-1]), reversal_reason)
 
     if (minsep < (alim_ft - margin_ft)) or (sep_cpa < (alim_ft - margin_ft)):
-        return ("STRENGTHEN", minsep, sep_cpa, float(t_check))
+        return ("STRENGTHEN", minsep, sep_cpa, float(t_check), None)
 
-    return ("NONE", minsep, sep_cpa, float(t_check))
+    return ("NONE", minsep, sep_cpa, float(t_check), None)
 
 
 def apply_second_phase(
@@ -521,6 +531,11 @@ def run_batch(
     hdg2_min: float = 0.0,
     hdg2_max: float = 360.0,
     alim_override_ft: Optional[float] = None,
+    use_custom_tgo: bool = False,
+    tgo_min_s: Optional[float] = None,
+    tgo_max_s: Optional[float] = None,
+    apfd_mode: str = "custom",
+    force_cat_ias_250: bool = False,
 ) -> pd.DataFrame:
     rng = np.random.default_rng(int(seed))
     data: List[Dict] = []
@@ -534,12 +549,26 @@ def run_batch(
     else:  # Custom
         rel_min = rel_max = None
 
+    mode_key = apfd_mode.lower().strip()
+    if mode_key in {"mixed", "mixed global", "mixed global traffic"}:
+        apfd_mode_key = "mixed"
+        apfd_share_effective = 0.10
+    elif mode_key in {"airbus", "airbus-centric", "airbus centric"}:
+        apfd_mode_key = "airbus"
+        apfd_share_effective = 0.30
+    else:
+        apfd_mode_key = "custom"
+        apfd_share_effective = float(np.clip(apfd_share, 0.0, 1.0))
+
     for k in range(int(runs)):
         FL_PL, FL_CAT, h0 = sample_altitudes_and_h0(rng)
         cat_above = (FL_CAT > FL_PL) if (FL_CAT != FL_PL) else (rng.uniform() < 0.5)
 
         PL_TAS = ias_to_tas(PL_IAS_KT, FL_PL * 100.0)
-        CAT_TAS = float(rng.uniform(420.0, 470.0))
+        if force_cat_ias_250:
+            CAT_TAS = ias_to_tas(250.0, FL_CAT * 100.0)
+        else:
+            CAT_TAS = float(rng.uniform(420.0, 470.0))
         if scenario == "Custom":
             h1 = float(rng.uniform(hdg1_min, hdg1_max))
             h2 = float(rng.uniform(hdg2_min, hdg2_max))
@@ -549,22 +578,35 @@ def run_batch(
         vcl = relative_closure_kt(PL_TAS, h1, CAT_TAS, h2)
         tgo_geom = time_to_go_from_geometry(r0, vcl)
 
-        # RA timing window with scenario-shaped mean
-        if scenario == "Head-on":
-            mu, sd = 25.0, 5.0
-        elif scenario == "Crossing":
-            mu, sd = 22.0, 6.0
+        if use_custom_tgo:
+            lo_user = float(np.clip(tgo_min_s if tgo_min_s is not None else TGO_MIN_S, TGO_MIN_S, TGO_MAX_S))
+            hi_user = float(np.clip(tgo_max_s if tgo_max_s is not None else TGO_MAX_S, TGO_MIN_S, TGO_MAX_S))
+            if hi_user <= lo_user + 1e-3:
+                hi_user = min(TGO_MAX_S, lo_user + 1.0)
+            mu = float(np.clip(0.5 * (lo_user + hi_user), 24.0, 26.0))
+            sd = max((hi_user - lo_user) / 6.0, 0.5)
+            lo = lo_user
+            hi = hi_user
         else:
-            mu, sd = 30.0, 8.0
-        lo, hi = TGO_MIN_S, min(tgo_geom if tgo_geom is not None else TGO_MAX_S, TGO_MAX_S)
-        tgo = float(np.clip(rng.normal(mu, sd), lo, max(lo + 1.0, hi)))
+            if scenario == "Head-on":
+                mu, sd = 25.0, 5.0
+            elif scenario == "Crossing":
+                mu, sd = 22.0, 6.0
+            else:
+                mu, sd = 30.0, 8.0
+            lo = TGO_MIN_S
+            hi = TGO_MAX_S
+        geom_limit = tgo_geom if tgo_geom is not None else TGO_MAX_S
+        hi = min(hi, geom_limit)
+        hi = float(np.clip(hi, lo + 0.5, TGO_MAX_S))
+        if hi <= lo + 1e-3:
+            hi = min(TGO_MAX_S, lo + 1.0)
+        tgo = float(np.clip(rng.normal(mu, sd), lo, hi))
 
-        # Initial VS (aggressiveness; level-off context at 0.0)
         leveloff_context = aggressiveness <= 1e-6
         vz0_pl = sample_initial_vs_with_aggressiveness(rng, aggressiveness, leveloff_context)
         vz0_cat = sample_initial_vs_with_aggressiveness(rng, aggressiveness, leveloff_context)
 
-        # Optimal sense under nominal CAT
         (sense_pl, sense_ca), miss_nominal, miss_alt = choose_optimal_sense(
             tgo,
             dt,
@@ -578,46 +620,74 @@ def run_batch(
             cat_cap=CAT_CAP_INIT_FPM,
         )
 
-        # CAT delay mixture + AP/FD share
         if use_delay_mixture:
-            if rng.uniform() < 0.7:
-                cat_delay_eff = float(max(0.0, rng.normal(4.5, 1.0)))
-                cat_accel_eff = float(max(0.05, rng.normal(0.25, 0.03)))
+            fast_share = rng.uniform(0.60, 0.70)
+            if rng.uniform() < fast_share:
+                cat_delay_eff = float(rng.uniform(4.0, 5.0))
+                cat_accel_eff = float(rng.uniform(0.20, 0.25))
             else:
-                cat_delay_eff = float(max(0.0, rng.normal(8.5, 1.5)))
-                cat_accel_eff = float(max(0.05, rng.normal(0.10, 0.02)))
+                cat_delay_eff = float(rng.uniform(8.0, 10.0))
+                cat_accel_eff = float(rng.uniform(0.12, 0.18))
         else:
             cat_delay_eff = 5.0
-            cat_accel_eff = 0.25
-        if rng.uniform() < apfd_share:
-            cat_delay_eff = max(0.0, cat_delay_eff - 0.8)
-            cat_accel_eff = max(0.05, cat_accel_eff + 0.03)
+            cat_accel_eff = 0.22
 
-        # Non-compliance after sense selection
-        (
-            mode,
-            sense_cat_exec,
-            cat_delay_exec,
-            cat_accel_exec,
-            cat_vs_exec,
-            cat_cap_exec,
-        ) = apply_non_compliance_to_cat(
-            rng,
-            sense_ca,
-            base_delay_s=cat_delay_eff,
-            base_accel_g=cat_accel_eff,
-            vs_fpm=CAT_INIT_VS_FPM,
-            cap_fpm=CAT_CAP_INIT_FPM,
-            p_opp=p_opp,
-            p_taonly=p_ta,
-            p_weak=p_weak,
-            jitter=jitter_priors,
-        )
+        is_apfd = rng.uniform() < apfd_share_effective
+        cat_is_apfd = bool(is_apfd and apfd_mode_key != "custom")
+        if apfd_mode_key == "custom":
+            if is_apfd:
+                cat_delay_eff = max(0.0, cat_delay_eff - 0.8)
+                cat_accel_eff = float(np.clip(cat_accel_eff + 0.03, 0.20, 0.25))
+            (
+                mode,
+                sense_cat_exec,
+                cat_delay_exec,
+                cat_accel_exec,
+                cat_vs_exec,
+                cat_cap_exec,
+            ) = apply_non_compliance_to_cat(
+                rng,
+                sense_ca,
+                base_delay_s=cat_delay_eff,
+                base_accel_g=cat_accel_eff,
+                vs_fpm=CAT_INIT_VS_FPM,
+                cap_fpm=CAT_CAP_INIT_FPM,
+                p_opp=p_opp,
+                p_taonly=p_ta,
+                p_weak=p_weak,
+                jitter=jitter_priors,
+            )
+        else:
+            if is_apfd:
+                mode = "AP/FD"
+                sense_cat_exec = sense_ca
+                cat_delay_exec = 1.25
+                cat_accel_exec = 0.20
+                cat_vs_exec = CAT_INIT_VS_FPM
+                cat_cap_exec = CAT_CAP_INIT_FPM
+            else:
+                (
+                    mode,
+                    sense_cat_exec,
+                    cat_delay_exec,
+                    cat_accel_exec,
+                    cat_vs_exec,
+                    cat_cap_exec,
+                ) = apply_non_compliance_to_cat(
+                    rng,
+                    sense_ca,
+                    base_delay_s=cat_delay_eff,
+                    base_accel_g=cat_accel_eff,
+                    vs_fpm=CAT_INIT_VS_FPM,
+                    cap_fpm=CAT_CAP_INIT_FPM,
+                    p_opp=p_opp,
+                    p_taonly=p_ta,
+                    p_weak=p_weak,
+                    jitter=jitter_priors,
+                )
 
-        # PL delay distribution
         pl_delay = max(0.0, rng.normal(PL_DELAY_MEAN_S, PL_DELAY_SD_S))
 
-        # First phase
         times, vs_pl = vs_time_series(
             tgo,
             dt,
@@ -641,11 +711,9 @@ def run_batch(
         z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
         z_ca = integrate_altitude_from_vs(times, vs_ca, h0 if cat_above else -h0)
 
-        # ALIM (altitude-dependent) at PL altitude or user override
         alim_ft = alim_ft_from_alt(FL_PL * 100.0, override_ft=alim_override_ft)
 
-        # Classify first-phase outcome
-        eventtype, minsep_ft, sep_cpa_ft, t_check = classify_event(
+        eventtype, minsep_ft, sep_cpa_ft, t_check, reversal_reason = classify_event(
             times,
             z_pl,
             z_ca,
@@ -658,7 +726,6 @@ def run_batch(
             sense_exec_cat=sense_cat_exec,
         )
 
-        # Second phase if applicable
         t2_issue = None
         if eventtype in ("STRENGTHEN", "REVERSE"):
             times2, vs_pl2, vs_ca2, t2_issue = apply_second_phase(
@@ -690,9 +757,24 @@ def run_batch(
                 sep_cpa_ft = float(sep2[-1])
                 times, vs_pl, vs_ca, z_pl, z_ca = times2, vs_pl2, vs_ca2, z_pl2, z_ca2
 
+        sep_trace = np.abs(z_ca - z_pl)
         miss_cpa_ft = float(abs(z_ca[-1] - z_pl[-1]))
+        margin_trace = sep_trace - alim_ft
+        window_mask = times >= (times[-1] - 1.0)
+        if not np.any(window_mask):
+            window_mask[-1] = True
+        outside_mask = ~window_mask
+        sep_window_min_ft = float(np.min(sep_trace[window_mask]))
+        alim_breach_cpa = bool(sep_trace[-1] < alim_ft)
+        alim_breach_margin = bool(np.any(sep_trace[window_mask] < alim_ft))
+        alim_breach_outside = bool(np.any(sep_trace[outside_mask] < alim_ft)) if np.any(outside_mask) else False
+        margin_min_ft = float(np.min(margin_trace))
 
-        # Compliance label (CAT) at ~3 s after movement
+        delta_pl = float(z_pl[-1] - z_pl[0])
+        delta_cat = float(z_ca[-1] - z_ca[0])
+        denom = max(abs(delta_pl), 1e-3)
+        residual_risk = abs(delta_cat) / denom * 0.011
+
         comp_label = compliance_score_method_b_like(
             sense_required=sense_cat_exec,
             vs_trace=vs_ca,
@@ -729,9 +811,19 @@ def run_batch(
                 missCPAft=miss_cpa_ft,
                 minsepft=minsep_ft,
                 sep_cpa_ft=sep_cpa_ft,
+                sep_window_min_ft=sep_window_min_ft,
+                margin_min_ft=margin_min_ft,
+                alim_breach_cpa=alim_breach_cpa,
+                alim_breach_margin=alim_breach_margin,
+                alim_breach_outside=alim_breach_outside,
                 eventtype=eventtype,
+                reverse_reason=reversal_reason,
                 t_second_issue=t2_issue,
                 comp_label=comp_label,
+                CAT_is_APFD=int(cat_is_apfd),
+                residual_risk=residual_risk,
+                delta_h_pl_ft=delta_pl,
+                delta_h_cat_ft=delta_cat,
             )
         )
 
