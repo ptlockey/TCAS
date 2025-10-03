@@ -78,6 +78,27 @@ with st.sidebar:
             step=0.5,
             help="Upper bound of the initial lateral separation sampled for each run."
         )
+        force_cat_ias = st.checkbox(
+            "Force CAT IAS to 250 kt",
+            value=False,
+            help="When enabled the intruder TAS is computed from a fixed 250 kt IAS regardless of altitude."
+        )
+        use_custom_tgo = st.checkbox(
+            "Custom time-to-CPA window",
+            value=False,
+            help="Enable to select bespoke minimum/maximum RA look-ahead times (bounded to 15–35 s)."
+        )
+        if use_custom_tgo:
+            tgo_minmax = st.slider(
+                "Time to CPA range (s)",
+                min_value=15.0,
+                max_value=35.0,
+                value=(22.0, 28.0),
+                step=0.5,
+                help="Minimum and maximum t_go bounds used when sampling encounters. The implied mean is clamped to 24–26 s."
+            )
+        else:
+            tgo_minmax = (None, None)
         if scenario == "Custom":
             hdg1_min = st.number_input("PL heading min (deg)", value=0.0, step=5.0,
                                        help="Minimum heading for the protected aircraft when sampling custom runs.")
@@ -95,45 +116,64 @@ with st.sidebar:
 
     with st.expander("Response Behaviour", expanded=True):
         aggressiveness = st.slider(
-            "Initial‑trajectory aggressiveness",
+            "Initial-trajectory aggressiveness",
             0.0,
             1.0,
             0.30,
             0.05,
-            help="0 = level‑off context; 1 = aggressive climb/descend mix."
+            help="0 = level-off context; 1 = aggressive climb/descend mix."
         )
         jitter = st.checkbox(
-            "Jitter non‑compliance priors (±30%)",
+            "Jitter non-compliance priors (±30%)",
             value=True,
             help="Randomly perturb the prior probabilities each batch to reflect modelling uncertainty."
         )
-        apfd_share = st.slider(
-            "AP/FD share",
-            0.0,
-            1.0,
-            0.25,
-            0.05,
-            help="Share of crews flying via AP/FD, which lowers delay and slightly boosts acceleration."
+        apfd_option = st.selectbox(
+            "AP/FD configuration",
+            [
+                "Custom share",
+                "Mixed global traffic (10%)",
+                "Airbus-centric (30%)",
+            ],
+            help="Choose how autopilot/flight-director usage is represented in the Monte Carlo runs."
         )
-        st.markdown("**Non‑compliance priors** (v7.1 tuned)")
+        if apfd_option == "Custom share":
+            apfd_mode = "custom"
+            apfd_share = st.slider(
+                "AP/FD share",
+                0.0,
+                1.0,
+                0.35,
+                0.05,
+                help="Share of crews flying via AP/FD, which lowers delay and slightly boosts acceleration."
+            )
+        elif apfd_option.startswith("Mixed"):
+            apfd_mode = "mixed"
+            apfd_share = 0.10
+            st.caption("Mixed global traffic fixes AP/FD usage at 10% with deterministic CAT kinematics for that share.")
+        else:
+            apfd_mode = "airbus"
+            apfd_share = 0.30
+            st.caption("Airbus-centric traffic fixes AP/FD usage at 30% with deterministic CAT kinematics for that share.")
+        st.markdown("**Non-compliance priors** (updated baseline)")
         p_opp = st.number_input(
-            "P(opposite‑sense)",
-            value=0.010,
+            "P(opposite-sense)",
+            value=0.020,
             step=0.001,
             format="%.3f",
             help="Probability that the intruder flies the opposite sense of the commanded RA."
         )
         p_ta = st.number_input(
-            "P(no‑response / TA‑only)",
-            value=0.003,
+            "P(no-response / TA-only)",
+            value=0.075,
             step=0.001,
             format="%.3f",
             help="Probability of no vertical response beyond traffic advisory behaviour."
         )
         p_weak = st.number_input(
-            "P(weak‑compliance)",
-            value=0.300,
-            step=0.010,
+            "P(weak-compliance)",
+            value=0.425,
+            step=0.005,
             format="%.3f",
             help="Probability that the intruder responds in the commanded sense but with insufficient vertical speed."
         )
@@ -221,16 +261,20 @@ with tabs[0]:
 
             delta_h_cpa = float(z_pl[-1] - z_cat[-1])
             miss_cpa = abs(delta_h_cpa)
+            delta_pl = float(z_pl[-1] - z_pl[0])
+            delta_cat = float(z_cat[-1] - z_cat[0])
+            residual_risk = abs(delta_cat) / max(abs(delta_pl), 1e-3) * 0.011
 
             st.markdown(
                 f"**Scenario**: Head-on at FL{SINGLE_FL}, PL IAS {PL_IAS_KT:.0f} kt (TAS {pl_tas:.1f} kt), "
                 f"CAT IAS {cat_ias_user:.0f} kt (TAS {cat_tas:.1f} kt)."
             )
 
-            c_metric1, c_metric2, c_metric3 = st.columns(3)
+            c_metric1, c_metric2, c_metric3, c_metric4 = st.columns(4)
             c_metric1.metric("Time to CPA", f"{t_cpa:.1f} s")
             c_metric2.metric("Range rate", f"{closure_kt:.1f} kt")
             c_metric3.metric("Δh at CPA", f"{delta_h_cpa:.0f} ft")
+            c_metric4.metric("Residual risk", f"{100 * residual_risk:,.3f}%")
             st.caption("These metrics describe the immediate geometry of the hand-crafted encounter.")
 
             fig, ax = plt.subplots(figsize=(8, 4))
@@ -262,6 +306,11 @@ with tabs[1]:
             hdg1_min=float(hdg1_min), hdg1_max=float(hdg1_max),
             hdg2_min=float(hdg2_min), hdg2_max=float(hdg2_max),
             alim_override_ft=float(selected_alim_ft),
+            use_custom_tgo=bool(use_custom_tgo),
+            tgo_min_s=(float(tgo_minmax[0]) if tgo_minmax[0] is not None else None),
+            tgo_max_s=(float(tgo_minmax[1]) if tgo_minmax[1] is not None else None),
+            apfd_mode=apfd_mode,
+            force_cat_ias_250=bool(force_cat_ias),
         )
         st.session_state['df'] = df
 
@@ -269,21 +318,65 @@ with tabs[1]:
         df = st.session_state['df']
         st.success(f"Completed {len(df)} runs.")
         st.caption(f"ALIM applied: {alim_selection_label} (±{selected_alim_ft:.0f} ft).")
-        c1, c2, c3, c4, c5 = st.columns(5)
-        p_rev = (df['eventtype'] == "REVERSE").mean()
-        p_str = (df['eventtype'] == "STRENGTHEN").mean()
-        p_none = (df['eventtype'] == "NONE").mean()
-        p_alim_any = (df['minsepft'] < df['ALIM_ft']).mean()
-        p_alim_cpa = (df['sep_cpa_ft'] < df['ALIM_ft']).mean()
+        report_alim_outside = st.checkbox(
+            "Report ALIM @ CPA outside ±1 s window",
+            value=False,
+            help="When enabled the displayed ALIM@CPA metric ignores breaches occurring within ±1 s of CPA."
+        )
+        total_runs = len(df)
+        safe_total = max(total_runs, 1)
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        p_rev = (df['eventtype'] == "REVERSE").sum() / safe_total
+        p_str = (df['eventtype'] == "STRENGTHEN").sum() / safe_total
+        p_none = (df['eventtype'] == "NONE").sum() / safe_total
+        p_alim_any = (df['margin_min_ft'] < 0.0).sum() / safe_total
+        p_alim_cpa = df['alim_breach_cpa'].sum() / safe_total
+        p_alim_margin = df['alim_breach_margin'].sum() / safe_total
+        p_alim_outside = df['alim_breach_outside'].sum() / safe_total
         c1.metric("P(Reversal)", f"{100 * p_rev:,.2f}%")
         c2.metric("P(Strengthen)", f"{100 * p_str:,.2f}%")
         c3.metric("P(None)", f"{100 * p_none:,.2f}%")
         c4.metric("P(ALIM Any)", f"{100 * p_alim_any:,.2f}%")
-        c5.metric("P(ALIM @ CPA)", f"{100 * p_alim_cpa:,.2f}%")
-        st.caption("Percentages report the proportion of Monte Carlo runs with each RA outcome or ALIM miss.")
+        if report_alim_outside:
+            c5.metric("P(ALIM @ CPA outside ±1 s)", f"{100 * p_alim_outside:,.2f}%")
+        else:
+            c5.metric("P(ALIM @ CPA)", f"{100 * p_alim_cpa:,.2f}%")
+        c6.metric("P(ALIM within ±1 s)", f"{100 * p_alim_margin:,.2f}%")
+        st.caption("Percentages describe RA outcomes alongside ALIM breaches at CPA, within ±1 s, and anywhere in the run.")
+        near_25 = (df['sep_cpa_ft'] - df['ALIM_ft']).abs() <= 25.0
+        near_50 = (df['sep_cpa_ft'] - df['ALIM_ft']).abs() <= 50.0
+        near_100 = (df['sep_cpa_ft'] - df['ALIM_ft']).abs() <= 100.0
+        near_25_rate = near_25.sum() / safe_total
+        near_50_rate = near_50.sum() / safe_total
+        near_100_rate = near_100.sum() / safe_total
+        nm1, nm2, nm3 = st.columns(3)
+        nm1.metric("CPA within ±25 ft of ALIM", f"{100 * near_25_rate:,.2f}%")
+        nm2.metric("CPA within ±50 ft of ALIM", f"{100 * near_50_rate:,.2f}%")
+        nm3.metric("CPA within ±100 ft of ALIM", f"{100 * near_100_rate:,.2f}%")
+        mean_rr = float(df['residual_risk'].mean()) if total_runs else 0.0
+        p95_rr = float(df['residual_risk'].quantile(0.95)) if total_runs else 0.0
+        rr1, rr2 = st.columns(2)
+        rr1.metric("Residual risk (mean)", f"{100 * mean_rr:,.3f}%")
+        rr2.metric("Residual risk (95th pct)", f"{100 * p95_rr:,.3f}%")
+        if (df['eventtype'] == "REVERSE").any():
+            reasons = (
+                df.loc[df['eventtype'] == "REVERSE", 'reverse_reason']
+                .fillna('Unclassified')
+                .value_counts(normalize=True)
+            )
+            reason_text = ", ".join(f"{k}: {100 * v:,.1f}%" for k, v in reasons.items())
+            st.caption(f"Reversal drivers — {reason_text}.")
+        else:
+            st.caption("No reversals observed in this batch.")
 
         st.markdown("### Preview")
-        st.dataframe(df.head(200), use_container_width=True)
+        reversal_only = st.checkbox(
+            "Show reversals only",
+            value=False,
+            help="Filter the preview/table to reversal runs only."
+        )
+        preview_df = df[df['eventtype'] == "REVERSE"] if reversal_only else df
+        st.dataframe(preview_df.head(200), use_container_width=True)
 
         st.markdown("### Batch insights")
 
