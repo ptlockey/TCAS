@@ -374,6 +374,47 @@ def test_classify_event_no_response_triggers_exigent_strengthen():
     assert np.isclose(t_detect, 1.0)
 
 
+def test_classify_event_same_sense_improvement_hold_defers_reversal():
+    closure_fps = 20.0
+    times = np.array([0.0, 0.4, 0.8, 1.2, 1.6, 2.0, 2.4, 2.8])
+    tau_seq = np.array([22.0, 21.2, 20.4, 19.6, 18.8, 18.0, 17.0, 16.0])
+    sep = tau_seq * closure_fps
+
+    z_pl = np.zeros_like(times)
+    z_ca = sep.copy()
+    vs_pl = np.zeros_like(times)
+    vs_ca = np.full_like(times, -closure_fps * 60.0)
+
+    # Temporarily reduce the strengthen threshold pad and improvement tolerance so
+    # that the synthetic geometry exercises the reversal-hold logic directly.
+    import simulation as sim_mod
+
+    orig_pad = sim_mod.STRENGTHEN_PAD_FT
+    orig_tol = sim_mod.PREDICTED_MISS_IMPROVEMENT_TOL_FT
+    try:
+        sim_mod.STRENGTHEN_PAD_FT = -500.0
+        sim_mod.PREDICTED_MISS_IMPROVEMENT_TOL_FT = -1.0
+
+        eventtype, _, _, _, event_detail = classify_event(
+            times=times,
+            z_pl=z_pl,
+            z_ca=z_ca,
+            vs_pl=vs_pl,
+            vs_ca=vs_ca,
+            tgo=25.0,
+            alim_ft=400.0,
+            margin_ft=100.0,
+            sense_chosen_cat=-1,
+            sense_exec_cat=-1,
+        )
+    finally:
+        sim_mod.STRENGTHEN_PAD_FT = orig_pad
+        sim_mod.PREDICTED_MISS_IMPROVEMENT_TOL_FT = orig_tol
+
+    assert eventtype == "NONE"
+    assert event_detail is None
+
+
 def test_run_batch_deterministic_seed():
     df1 = run_batch(
         runs=20,
@@ -435,3 +476,23 @@ def test_run_batch_records_maneuver_sequence():
         if second_issue is not None and not np.isnan(second_issue):
             assert second_issue >= first["t_issue"]
             assert np.isclose(row["tau_second_issue"], row["tgos"] - second_issue)
+
+
+def test_run_batch_same_sense_reversal_rate_with_hold():
+    df = run_batch(
+        runs=200,
+        seed=26,
+        scenario="Head-on",
+        jitter_priors=True,
+        use_delay_mixture=True,
+        apfd_share=0.25,
+    )
+
+    same_sense_slow = (
+        (df["eventtype"] == "REVERSE")
+        & (df["event_detail"] == "Slow response")
+        & (df["senseCAT_chosen"] == df["senseCAT_exec"])
+    )
+
+    slow_rate = same_sense_slow.mean()
+    assert slow_rate < 0.05

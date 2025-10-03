@@ -442,6 +442,7 @@ def classify_event(
 
     no_response_checked = False
     improvement_timer_s = 0.0
+    hold_window_satisfied = False
     prev_time = float(times[0]) if times.size else 0.0
 
     for idx, t_now in enumerate(times):
@@ -518,6 +519,7 @@ def classify_event(
         thin_pred = pred_miss < alim_ft
         if not thin_pred:
             improvement_timer_s = 0.0
+            hold_window_satisfied = False
             prev_time = float(t_now)
             continue
 
@@ -540,25 +542,25 @@ def classify_event(
         enough_vs = achieved_vs >= 0.7 * CAT_INIT_VS_FPM
 
         dt_sample = float(t_now - prev_time) if idx > 0 else 0.0
-        if (
-            same_sense
-            and improving
-            and enough_vs
-            and tau_now >= REVERSAL_HOLD_DISABLE_TAU_S
-        ):
+        tracking_improvement = same_sense and improving
+        if tracking_improvement:
             improvement_timer_s += dt_sample
         else:
             improvement_timer_s = 0.0
+            hold_window_satisfied = False
+
+        if (
+            tracking_improvement
+            and tau_now >= REVERSAL_HOLD_DISABLE_TAU_S
+            and improvement_timer_s >= REVERSAL_IMPROVEMENT_HOLD_S
+        ):
+            hold_window_satisfied = True
 
         if tau_now > REVERSAL_ENABLE_TAU_S:
             prev_time = float(t_now)
             continue
 
-        hold_active = (
-            same_sense
-            and tau_now >= REVERSAL_HOLD_DISABLE_TAU_S
-            and improvement_timer_s >= REVERSAL_IMPROVEMENT_HOLD_S
-        )
+        hold_active = tracking_improvement and hold_window_satisfied
         if hold_active:
             prev_time = float(t_now)
             continue
