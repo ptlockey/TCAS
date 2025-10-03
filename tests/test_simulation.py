@@ -15,7 +15,9 @@ from simulation import (
     PL_DELAY_MEAN_S,
     PL_VS_CAP_FPM,
     PL_VS_FPM,
+    REVERSAL_GUARD_TGO_S,
     apply_second_phase,
+    classify_event,
     ias_to_tas,
     run_batch,
     vs_time_series,
@@ -132,6 +134,34 @@ def test_apply_second_phase_strengthen_weak_uses_reduced_targets():
     )
 
     assert np.allclose(suffix_vs, expected_vs)
+
+
+def test_classify_event_reversal_guard_uses_time_to_go():
+    times = np.arange(0.0, 21.0, 1.0)
+    sep0 = 1000.0
+    closure_fps = 50.0
+
+    z_pl = np.zeros_like(times)
+    z_ca = sep0 - closure_fps * times
+    vs_pl = np.zeros_like(times)
+    vs_ca = np.full_like(times, -closure_fps * 60.0)
+
+    eventtype, _, _, t_detect, reversal_reason = classify_event(
+        times=times,
+        z_pl=z_pl,
+        z_ca=z_ca,
+        vs_pl=vs_pl,
+        vs_ca=vs_ca,
+        tgo=20.0,
+        alim_ft=400.0,
+        margin_ft=100.0,
+        sense_chosen_cat=+1,
+        sense_exec_cat=-1,
+    )
+
+    assert eventtype == "REVERSE"
+    assert reversal_reason == "Opposite sense"
+    assert np.isclose(t_detect, 20.0 - REVERSAL_GUARD_TGO_S)
 
 
 def test_run_batch_deterministic_seed():
