@@ -83,6 +83,10 @@ MAX_MANEUVER_PHASES = 4
 # Sense determination
 VS_SENSE_DEADBAND_FPM = 50.0
 
+# Surveillance report noise (1σ) for classifier inputs
+VS_REPORT_NOISE_SD_FPM = 20.0
+ALT_REPORT_NOISE_SD_FT = 5.0
+
 
 def _normalise_mode_key(value: Optional[str]) -> str:
     """Return a lowercase alpha-numeric mode key for comparisons."""
@@ -1680,6 +1684,16 @@ def run_batch(
             z_pl_eval = current_z_pl[sample_indices]
             z_ca_eval = current_z_ca[sample_indices]
 
+            vs_pl_report = np.array(vs_pl_eval, copy=True, dtype=float)
+            vs_ca_report = np.array(vs_ca_eval, copy=True, dtype=float)
+            z_pl_report = np.array(z_pl_eval, copy=True, dtype=float)
+            z_ca_report = np.array(z_ca_eval, copy=True, dtype=float)
+
+            vs_pl_report += rng.normal(0.0, VS_REPORT_NOISE_SD_FPM, size=vs_pl_report.shape)
+            vs_ca_report += rng.normal(0.0, VS_REPORT_NOISE_SD_FPM, size=vs_ca_report.shape)
+            z_pl_report += rng.normal(0.0, ALT_REPORT_NOISE_SD_FT, size=z_pl_report.shape)
+            z_ca_report += rng.normal(0.0, ALT_REPORT_NOISE_SD_FT, size=z_ca_report.shape)
+
             second_phase_cat_delay_base = 0.9 if cat_is_apfd else 2.5
             decision_latency = float(np.clip(rng.normal(1.0, 0.2), 0.6, 1.4))
             dropout_active_now = dropout_cycles_remaining > 0
@@ -1689,10 +1703,10 @@ def run_batch(
 
             eventtype, _, _, t_detect, event_detail = classify_event(
                 times_eval,
-                z_pl_eval,
-                z_ca_eval,
-                vs_pl_eval,
-                vs_ca_eval,
+                z_pl_report,
+                z_ca_report,
+                vs_pl_report,
+                vs_ca_report,
                 tgo,
                 alim_ft=alim_ft,
                 margin_ft=ALIM_MARGIN_FT,
