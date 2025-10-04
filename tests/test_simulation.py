@@ -948,20 +948,23 @@ def test_classify_event_apfd_improvement_strengthens_instead_of_reversing():
 
 
 def test_run_batch_deterministic_seed():
-    df1 = run_batch(
-        runs=20,
-        seed=123,
-        jitter_priors=False,
-        use_delay_mixture=False,
-        apfd_share=0.0,
-    )
-    df2 = run_batch(
-        runs=20,
-        seed=123,
-        jitter_priors=False,
-        use_delay_mixture=False,
-        apfd_share=0.0,
-    )
+    with patch("simulation.VS_REPORT_NOISE_SD_FPM", 0.0), patch(
+        "simulation.ALT_REPORT_NOISE_SD_FT", 0.0
+    ):
+        df1 = run_batch(
+            runs=20,
+            seed=123,
+            jitter_priors=False,
+            use_delay_mixture=False,
+            apfd_share=0.0,
+        )
+        df2 = run_batch(
+            runs=20,
+            seed=123,
+            jitter_priors=False,
+            use_delay_mixture=False,
+            apfd_share=0.0,
+        )
 
     assert len(df1) == len(df2) == 20
     pdt.assert_frame_equal(df1.reset_index(drop=True), df2.reset_index(drop=True))
