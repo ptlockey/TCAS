@@ -15,6 +15,7 @@ Implements the requested amendments on top of your functioning codebase:
 """
 from __future__ import annotations
 
+import json
 from typing import Optional, Tuple
 
 import numpy as np
@@ -36,6 +37,7 @@ from simulation import (
     PL_VS_FPM,
     ias_to_tas,
     integrate_altitude_from_vs,
+    OppositeSenseBand,
     run_batch,
     sanitize_tgo_bounds,
     time_to_go_from_geometry,
@@ -195,27 +197,89 @@ with st.sidebar:
         apfd_mode, apfd_share = sanitize_apfd_config(apfd_option, apfd_raw_share)
         apfd_share_sanitized = float(apfd_share)
         st.markdown("**Non-compliance priors** (updated baseline)")
-        p_opp = st.number_input(
-            "P(opposite-sense)",
+        p_opp_manual = st.number_input(
+            "Manual P(opposite-sense)",
             value=0.020,
             step=0.001,
             format="%.3f",
-            help="Probability that the intruder flies the opposite sense of the commanded RA."
+            help="Probability that a manually flown intruder flies the opposite sense of the commanded RA.",
         )
+        same_rate = st.checkbox(
+            "AP/FD crews use the manual opposite-sense rate",
+            value=True,
+            help="Disable to enter a bespoke opposite-sense rate for AP/FD crews.",
+        )
+        if same_rate:
+            p_opp_apfd = None
+        else:
+            p_opp_apfd = st.number_input(
+                "AP/FD P(opposite-sense)",
+                value=float(p_opp_manual),
+                step=0.001,
+                format="%.3f",
+                help="Probability that an AP/FD-flown intruder flies the opposite sense of the commanded RA.",
+            )
         p_ta = st.number_input(
             "P(no-response / TA-only)",
             value=0.075,
             step=0.001,
             format="%.3f",
-            help="Probability of no vertical response beyond traffic advisory behaviour."
+            help="Probability of no vertical response beyond traffic advisory behaviour.",
         )
         p_weak = st.number_input(
             "P(weak-compliance)",
             value=0.425,
             step=0.005,
             format="%.3f",
-            help="Probability that the intruder responds in the commanded sense but with insufficient vertical speed."
+            help="Probability that the intruder responds in the commanded sense but with insufficient vertical speed.",
         )
+
+        opp_bands = None
+        use_alt_bands = st.checkbox(
+            "Specify altitude-dependent opposite-sense overrides",
+            value=False,
+            help="Enable to load a JSON list of altitude bands with bespoke manual/AP/FD opposite-sense probabilities.",
+        )
+        if use_alt_bands:
+            default_json = json.dumps(
+                [
+                    {"alt_min_ft": 0.0, "alt_max_ft": 10000.0, "manual": 0.02, "apfd": 0.01},
+                    {"alt_min_ft": 10000.0, "alt_max_ft": 20000.0, "manual": 0.03, "apfd": 0.015},
+                ],
+                indent=2,
+            )
+            opp_band_json = st.text_area(
+                "Altitude band configuration (JSON)",
+                value=default_json,
+                height=180,
+                help=(
+                    "Provide a JSON list of objects with keys 'alt_min_ft', 'alt_max_ft', 'manual', and optional 'apfd'. "
+                    "Bands are applied in order to determine the opposite-sense probability."
+                ),
+            )
+            try:
+                raw = json.loads(opp_band_json)
+                if isinstance(raw, dict):
+                    raw = [raw]
+                opp_bands = []
+                for item in raw:
+                    if not isinstance(item, dict):
+                        raise ValueError("Each entry must be an object")
+                    alt_min = float(item["alt_min_ft"])
+                    alt_max = float(item["alt_max_ft"])
+                    manual = float(item["manual"])
+                    apfd = item.get("apfd")
+                    opp_bands.append(
+                        OppositeSenseBand(
+                            alt_min_ft=alt_min,
+                            alt_max_ft=alt_max,
+                            manual_prob=manual,
+                            apfd_prob=None if apfd is None else float(apfd),
+                        )
+                    )
+            except Exception as exc:  # noqa: BLE001
+                st.warning(f"Could not parse altitude bands: {exc}")
+                opp_bands = None
 
 
     with st.expander("ALIM Settings", expanded=True):
@@ -343,7 +407,9 @@ with tabs[1]:
             runs=int(n_runs), seed=int(seed), scenario=scenario,
             r0_min_nm=float(r0_min), r0_max_nm=float(r0_max),
             aggressiveness=float(aggressiveness),
-            p_opp=float(p_opp), p_ta=float(p_ta), p_weak=float(p_weak),
+            p_opp=float(p_opp_manual), p_ta=float(p_ta), p_weak=float(p_weak),
+            opp_sense_apfd=None if p_opp_apfd is None else float(p_opp_apfd),
+            opp_sense_bands=opp_bands,
             jitter_priors=bool(jitter), apfd_share=apfd_share_sanitized,
             use_delay_mixture=True,
             dt=0.1,

@@ -24,6 +24,7 @@ from simulation import (
     classify_event,
     integrate_altitude_from_vs,
     ias_to_tas,
+    OppositeSenseModel,
     run_batch,
     vs_time_series,
 )
@@ -1235,3 +1236,49 @@ def test_classify_event_opposite_sense_still_reverses():
 
     assert eventtype == "REVERSE"
     assert detail == "Exigent wrong-sense"
+
+
+def test_run_batch_manual_opposite_sense_high_rate():
+    model = OppositeSenseModel.from_parameters(manual_baseline=0.8, jitter_enabled=False)
+    df = run_batch(
+        runs=600,
+        seed=321,
+        scenario="Head-on",
+        apfd_share=0.0,
+        jitter_priors=False,
+        p_ta=0.0,
+        p_weak=0.0,
+        opp_sense_model=model,
+    )
+
+    mask = (df["CAT_is_APFD"] == 0) & (df["senseCAT_chosen"].abs() == 1)
+    assert mask.any()
+    wrong_share = (
+        df.loc[mask, "senseCAT_exec"] == -df.loc[mask, "senseCAT_chosen"]
+    ).mean()
+    assert 0.7 <= wrong_share <= 0.9
+
+
+def test_run_batch_apfd_opposite_sense_low_rate():
+    model = OppositeSenseModel.from_parameters(
+        manual_baseline=0.3,
+        apfd_baseline=0.05,
+        jitter_enabled=False,
+    )
+    df = run_batch(
+        runs=800,
+        seed=654,
+        scenario="Head-on",
+        apfd_share=1.0,
+        jitter_priors=False,
+        p_ta=0.0,
+        p_weak=0.0,
+        opp_sense_model=model,
+    )
+
+    mask = (df["CAT_is_APFD"] == 1) & (df["senseCAT_chosen"].abs() == 1)
+    assert mask.any()
+    wrong_share = (
+        df.loc[mask, "senseCAT_exec"] == -df.loc[mask, "senseCAT_chosen"]
+    ).mean()
+    assert 0.02 <= wrong_share <= 0.08
