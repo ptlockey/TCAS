@@ -37,6 +37,12 @@ CAT_STRENGTH_FPM     = 2500.0
 CAT_CAP_INIT_FPM     = 1600.0
 CAT_CAP_STRENGTH_FPM = 2600.0
 
+# Nominal CAT response characteristics for sense prediction
+CAT_MANUAL_DELAY_NOM_S = 5.0
+CAT_MANUAL_ACCEL_NOM_G = 0.33
+CAT_APFD_DELAY_NOM_S = 0.9
+CAT_APFD_ACCEL_NOM_G = 0.25
+
 # RA timing window
 TGO_MIN_S = 15.0
 TGO_MAX_S = 35.0
@@ -1501,8 +1507,8 @@ def run_batch(
         cat_profiles = [
             {
                 "label": "manual",
-                "delay": cat_delay_eff,
-                "accel": cat_accel_eff,
+                "delay": CAT_MANUAL_DELAY_NOM_S,
+                "accel": CAT_MANUAL_ACCEL_NOM_G,
                 "vs": CAT_INIT_VS_FPM,
                 "cap": CAT_CAP_INIT_FPM,
                 "weight": manual_weight,
@@ -1512,8 +1518,8 @@ def run_batch(
             cat_profiles.append(
                 {
                     "label": "apfd",
-                    "delay": 0.9,
-                    "accel": 0.25,
+                    "delay": CAT_APFD_DELAY_NOM_S,
+                    "accel": CAT_APFD_ACCEL_NOM_G,
                     "vs": CAT_INIT_VS_FPM,
                     "cap": CAT_CAP_INIT_FPM,
                     "weight": float(np.clip(apfd_share_effective, 0.0, 1.0)),
@@ -1527,8 +1533,8 @@ def run_batch(
             cat_above,
             vz0_pl,
             vz0_cat,
-            cat_delay_nom=cat_delay_eff,
-            cat_accel_nom=cat_accel_eff,
+            cat_delay_nom=CAT_MANUAL_DELAY_NOM_S,
+            cat_accel_nom=CAT_MANUAL_ACCEL_NOM_G,
             cat_vs=CAT_INIT_VS_FPM,
             cat_cap=CAT_CAP_INIT_FPM,
             cat_profiles=tuple(cat_profiles),
@@ -1537,8 +1543,8 @@ def run_batch(
         is_apfd = rng.uniform() < apfd_share_effective
         cat_is_apfd = bool(is_apfd)
         cat_mode_key = "apfd" if is_apfd else "manual"
-        base_delay = 0.9 if is_apfd else cat_delay_eff
-        base_accel = 0.25 if is_apfd else cat_accel_eff
+        base_delay = CAT_APFD_DELAY_NOM_S if is_apfd else cat_delay_eff
+        base_accel = CAT_APFD_ACCEL_NOM_G if is_apfd else cat_accel_eff
         (
             mode,
             sense_cat_exec,
@@ -1937,6 +1943,10 @@ __all__ = [
     "CAT_STRENGTH_FPM",
     "CAT_CAP_INIT_FPM",
     "CAT_CAP_STRENGTH_FPM",
+    "CAT_MANUAL_DELAY_NOM_S",
+    "CAT_MANUAL_ACCEL_NOM_G",
+    "CAT_APFD_DELAY_NOM_S",
+    "CAT_APFD_ACCEL_NOM_G",
     "TGO_MIN_S",
     "TGO_MAX_S",
     "ALIM_MARGIN_FT",

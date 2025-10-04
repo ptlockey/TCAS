@@ -36,6 +36,8 @@ from simulation import (
     extend_history_with_pretrigger,
     run_batch,
     vs_time_series,
+    CAT_MANUAL_ACCEL_NOM_G,
+    CAT_MANUAL_DELAY_NOM_S,
 )
 
 
@@ -949,6 +951,46 @@ def test_run_batch_records_maneuver_sequence():
         if second_issue is not None and not np.isnan(second_issue):
             assert second_issue >= first["t_issue"]
             assert np.isclose(row["tau_second_issue"], row["tgos"] - second_issue)
+
+
+def test_run_batch_predicted_miss_uses_nominal_cat_profiles():
+    captured_profiles = []
+    captured_base_params = []
+
+    original_choose = choose_optimal_sense
+    original_apply = apply_non_compliance_to_cat
+
+    def capture_choose(*args, **kwargs):
+        captured_profiles.append(kwargs.get("cat_profiles"))
+        return original_choose(*args, **kwargs)
+
+    def capture_apply(*args, **kwargs):
+        captured_base_params.append((kwargs["base_delay_s"], kwargs["base_accel_g"]))
+        return original_apply(*args, **kwargs)
+
+    with patch("simulation.choose_optimal_sense", new=capture_choose), patch(
+        "simulation.apply_non_compliance_to_cat", new=capture_apply
+    ):
+        run_batch(
+            runs=1,
+            seed=2024,
+            jitter_priors=False,
+            use_delay_mixture=True,
+            apfd_share=0.0,
+        )
+
+    assert captured_profiles, "choose_optimal_sense was not invoked"
+    profiles = captured_profiles[0]
+    assert isinstance(profiles, tuple)
+    assert profiles, "cat_profiles should include at least one template"
+
+    manual_profile = profiles[0]
+    assert np.isclose(manual_profile["accel"], CAT_MANUAL_ACCEL_NOM_G)
+    assert np.isclose(manual_profile["delay"], CAT_MANUAL_DELAY_NOM_S)
+
+    assert captured_base_params, "apply_non_compliance_to_cat was not invoked"
+    _, accel_exec = captured_base_params[0]
+    assert not np.isclose(accel_exec, CAT_MANUAL_ACCEL_NOM_G)
 
 
 def test_run_inspector_handles_missing_second_issue_column():
