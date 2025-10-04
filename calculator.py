@@ -25,6 +25,11 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import streamlit as st
 
+from preview_filters import (
+    LOWEST_SEPARATION_WINDOW_FT,
+    build_preview_dataframe,
+)
+
 from simulation import (
     CAT_CAP_INIT_FPM,
     CAT_CAP_STRENGTH_FPM,
@@ -532,8 +537,40 @@ with tabs[1]:
             value=False,
             help="Filter the preview/table to reversal runs only."
         )
-        preview_df = df[df['eventtype'] == "REVERSE"] if reversal_only else df
-        st.dataframe(preview_df.head(200), use_container_width=True)
+        lowest_separation_only = st.checkbox(
+            "Lowest separation heights",
+            value=False,
+            help=(
+                "When enabled, restrict the preview to runs whose CPA separation sits within "
+                f"{LOWEST_SEPARATION_WINDOW_FT:.0f} ft of the batch minimum, sorted from lowest to highest."
+            )
+        )
+
+        preview_df = build_preview_dataframe(
+            df,
+            reversal_only=reversal_only,
+            lowest_separation_only=lowest_separation_only,
+        )
+
+        if preview_df.empty:
+            st.info(
+                "No runs match the current preview filters. Clear one or more filters to explore the batch."
+            )
+        else:
+            st.dataframe(preview_df.head(200), use_container_width=True)
+
+            if lowest_separation_only and 'sep_cpa_ft' in df.columns:
+                min_sep = float(df['sep_cpa_ft'].min())
+                if not np.isnan(min_sep):
+                    threshold = min_sep + LOWEST_SEPARATION_WINDOW_FT
+                    st.caption(
+                        "Previewing the tightest CPA separations: runs ≤ "
+                        f"{threshold:,.0f} ft (minimum observed {min_sep:,.0f} ft)."
+                    )
+            elif reversal_only:
+                st.caption("Preview limited to reversal runs; disable the filter to view the full batch.")
+            else:
+                st.caption("Showing the first 200 runs from the batch preview.")
 
         st.markdown("### Batch insights")
 
@@ -619,121 +656,127 @@ with tabs[1]:
         )
 
         with st.expander("Inspect an individual run", expanded=False):
-            rid = st.number_input(
-                "Run id",
-                min_value=int(df['run'].min()),
-                max_value=int(df['run'].max()),
-                value=int(df['run'].min()),
-                help="Select a run to inspect the time history corresponding to that Monte Carlo sample.",
-            )
-            row = df[df['run'] == rid].iloc[0]
-
-            # Reconstruct manoeuvre histories using stored data when available.
-            tgo = float(row["tgos"])
-            h0 = float(row["h0ft"])
-            FL_pl = int(row["FL_PL"])
-            FL_cat = int(row["FL_CAT"])
-            if "cat_above" in row.index and not pd.isna(row["cat_above"]):
-                cat_above = bool(row["cat_above"])
+            if preview_df.empty:
+                st.info("Run inspection is unavailable because no runs satisfy the current preview filters.")
             else:
-                cat_above = (FL_cat > FL_pl) if (FL_cat != FL_pl) else True
-            alim_ft = float(row['ALIM_ft'])
+                run_options = sorted(set(preview_df['run'].astype(int)))
+                rid = st.select_slider(
+                    "Run id",
+                    options=run_options,
+                    value=run_options[0],
+                    help=(
+                        "Step through runs that match the preview filters above."
+                        " Adjust the filters to widen or narrow this subset."
+                    )
+                )
+                row = preview_df[preview_df['run'] == rid].iloc[0]
 
-            sense_pl_final = int(row["sensePL_final"]) if "sensePL_final" in row.index else int(row["sensePL"])
-            sense_cat_final = int(row["senseCAT_exec_final"]) if "senseCAT_exec_final" in row.index else int(row["senseCAT_exec"])
+                # Reconstruct manoeuvre histories using stored data when available.
+                tgo = float(row["tgos"])
+                h0 = float(row["h0ft"])
+                FL_pl = int(row["FL_PL"])
+                FL_cat = int(row["FL_CAT"])
+                if "cat_above" in row.index and not pd.isna(row["cat_above"]):
+                    cat_above = bool(row["cat_above"])
+                else:
+                    cat_above = (FL_cat > FL_pl) if (FL_cat != FL_pl) else True
+                alim_ft = float(row['ALIM_ft'])
 
-            pl_vs0_init = float(row.get("pl_vs0_init", 0.0))
-            cat_vs0_init = float(row.get("cat_vs0_init", 0.0))
+                sense_pl_final = int(row["sensePL_final"]) if "sensePL_final" in row.index else int(row["sensePL"])
+                sense_cat_final = int(row["senseCAT_exec_final"]) if "senseCAT_exec_final" in row.index else int(row["senseCAT_exec"])
 
-            history_data = None
-            if "time_history_json" in row.index:
-                history_data = decode_time_history(row["time_history_json"])
+                pl_vs0_init = float(row.get("pl_vs0_init", 0.0))
+                cat_vs0_init = float(row.get("cat_vs0_init", 0.0))
 
-            if history_data is not None:
-                times = history_data["times"]
-                vs_pl = history_data["vs_pl"]
-                vs_ca = history_data["vs_ca"]
-                z_pl = history_data.get("z_pl")
-                z_ca = history_data.get("z_ca")
-                if z_pl is None or z_ca is None:
+                history_data = None
+                if "time_history_json" in row.index:
+                    history_data = decode_time_history(row["time_history_json"])
+
+                if history_data is not None:
+                    times = history_data["times"]
+                    vs_pl = history_data["vs_pl"]
+                    vs_ca = history_data["vs_ca"]
+                    z_pl = history_data.get("z_pl")
+                    z_ca = history_data.get("z_ca")
+                    if z_pl is None or z_ca is None:
+                        z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
+                        z_ca = integrate_altitude_from_vs(
+                            times,
+                            vs_ca,
+                            h0 if cat_above else -h0,
+                        )
+                else:
+                    sense_pl = int(row["sensePL"])
+                    sense_cat_exec = int(row["senseCAT_exec"])
+                    cat_td = float(row["catDelay"])
+                    cat_ag = float(row["catAccel_g"])
+                    cat_vs = float(row["catVS_cmd"])
+                    cat_cap = float(row["catCap_cmd"])
+                    pl_delay = float(row["plDelay"])
+
+                    times, vs_pl = vs_time_series(
+                        tgo,
+                        0.1,
+                        pl_delay,
+                        PL_ACCEL_G,
+                        PL_VS_FPM,
+                        sense=sense_pl,
+                        cap_fpm=PL_VS_CAP_FPM,
+                        vs0_fpm=pl_vs0_init,
+                    )
+                    _, vs_ca = vs_time_series(
+                        tgo,
+                        0.1,
+                        cat_td,
+                        cat_ag,
+                        cat_vs,
+                        sense=sense_cat_exec,
+                        cap_fpm=cat_cap,
+                        vs0_fpm=cat_vs0_init,
+                    )
                     z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
                     z_ca = integrate_altitude_from_vs(
                         times,
                         vs_ca,
                         h0 if cat_above else -h0,
                     )
-            else:
-                sense_pl = int(row["sensePL"])
-                sense_cat_exec = int(row["senseCAT_exec"])
-                cat_td = float(row["catDelay"])
-                cat_ag = float(row["catAccel_g"])
-                cat_vs = float(row["catVS_cmd"])
-                cat_cap = float(row["catCap_cmd"])
-                pl_delay = float(row["plDelay"])
 
-                times, vs_pl = vs_time_series(
-                    tgo,
-                    0.1,
-                    pl_delay,
-                    PL_ACCEL_G,
-                    PL_VS_FPM,
-                    sense=sense_pl,
-                    cap_fpm=PL_VS_CAP_FPM,
-                    vs0_fpm=pl_vs0_init,
-                )
-                _, vs_ca = vs_time_series(
-                    tgo,
-                    0.1,
-                    cat_td,
-                    cat_ag,
-                    cat_vs,
-                    sense=sense_cat_exec,
-                    cap_fpm=cat_cap,
-                    vs0_fpm=cat_vs0_init,
-                )
-                z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
-                z_ca = integrate_altitude_from_vs(
+                miss_cpa = float(abs(z_ca[-1] - z_pl[-1])) if len(z_pl) else float("nan")
+
+                times_plot, z_pl_plot, z_ca_plot = extend_history_with_pretrigger(
                     times,
-                    vs_ca,
-                    h0 if cat_above else -h0,
+                    z_pl,
+                    z_ca,
+                    pl_vs0=pl_vs0_init,
+                    cat_vs0=cat_vs0_init,
                 )
 
-            miss_cpa = float(abs(z_ca[-1] - z_pl[-1])) if len(z_pl) else float("nan")
+                pl_label = "level" if sense_pl_final == 0 else ("climb" if sense_pl_final > 0 else "descend")
+                cat_label = "level" if sense_cat_final == 0 else ("climb" if sense_cat_final > 0 else "descend")
 
-            times_plot, z_pl_plot, z_ca_plot = extend_history_with_pretrigger(
-                times,
-                z_pl,
-                z_ca,
-                pl_vs0=pl_vs0_init,
-                cat_vs0=cat_vs0_init,
-            )
-
-            pl_label = "level" if sense_pl_final == 0 else ("climb" if sense_pl_final > 0 else "descend")
-            cat_label = "level" if sense_cat_final == 0 else ("climb" if sense_cat_final > 0 else "descend")
-
-            fig_run, ax_run = plt.subplots(figsize=(8,4))
-            ax_run.plot(times_plot, z_pl_plot, label=f"PL ({pl_label})")
-            ax_run.plot(
-                times_plot,
-                z_ca_plot,
-                label=f"CAT ({cat_label}) [{row['CAT_mode']}]",
-            )
-            ax_run.fill_between(
-                times_plot,
-                z_pl_plot - alim_ft,
-                z_pl_plot + alim_ft,
-                alpha=0.08,
-                label=f"±ALIM at FL{FL_pl}",
-            )
-            ax_run.axhline(0, ls='--', lw=1, alpha=0.6)
-            if not pd.isna(row['t_second_issue']):
-                ax_run.axvline(float(row['t_second_issue']), ls=':', lw=1, alpha=0.7, label='2nd‑phase issue')
-            ax_run.set_xlabel("Time since RA trigger (s)")
-            ax_run.set_ylabel("Relative altitude (ft)")
-            ax_run.set_title(f"Run {int(row['run'])} — {row['eventtype']} — Δh@CPA={miss_cpa:.0f} ft")
-            ax_run.legend(); ax_run.grid(True, alpha=0.3)
-            st.pyplot(fig_run)
-            st.caption("Shaded band visualises ±ALIM around the protected aircraft during the sampled run.")
+                fig_run, ax_run = plt.subplots(figsize=(8,4))
+                ax_run.plot(times_plot, z_pl_plot, label=f"PL ({pl_label})")
+                ax_run.plot(
+                    times_plot,
+                    z_ca_plot,
+                    label=f"CAT ({cat_label}) [{row['CAT_mode']}]",
+                )
+                ax_run.fill_between(
+                    times_plot,
+                    z_pl_plot - alim_ft,
+                    z_pl_plot + alim_ft,
+                    alpha=0.08,
+                    label=f"±ALIM at FL{FL_pl}",
+                )
+                ax_run.axhline(0, ls='--', lw=1, alpha=0.6)
+                if not pd.isna(row['t_second_issue']):
+                    ax_run.axvline(float(row['t_second_issue']), ls=':', lw=1, alpha=0.7, label='2nd‑phase issue')
+                ax_run.set_xlabel("Time since RA trigger (s)")
+                ax_run.set_ylabel("Relative altitude (ft)")
+                ax_run.set_title(f"Run {int(row['run'])} — {row['eventtype']} — Δh@CPA={miss_cpa:.0f} ft")
+                ax_run.legend(); ax_run.grid(True, alpha=0.3)
+                st.pyplot(fig_run)
+                st.caption("Shaded band visualises ±ALIM around the protected aircraft during the sampled run.")
 
 
         # Download
