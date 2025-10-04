@@ -51,6 +51,10 @@ CAT_APFD_PROJECTION_DELAY_S = CAT_APFD_DELAY_NOM_S
 TGO_MIN_S = 15.0
 TGO_MAX_S = 35.0
 
+# TCAS coordination cadence and reliability
+TCAS_UPDATE_PERIOD_S = 1.0  # seconds between TCAS surveillance updates
+COORDINATION_DROPOUT_PROB = 1e-3  # chance that an inter-unit handoff misses one cycle
+
 # ALIM margin for classification conservatism (ft)
 ALIM_MARGIN_FT = 100.0
 
@@ -1087,10 +1091,11 @@ def classify_event(
                 CAT_MANUAL_ACCEL_NOM_G if manual_case else CAT_APFD_ACCEL_NOM_G
             )
 
-            latency_proj = 1.0 if projection_decision_latency_s is None else float(
-                projection_decision_latency_s
-            )
-            latency_proj = float(np.clip(latency_proj, 0.6, 1.4))
+            if projection_decision_latency_s is None:
+                latency_proj = 1.0
+                latency_proj = float(np.clip(latency_proj, 0.6, 1.4))
+            else:
+                latency_proj = float(max(0.6, projection_decision_latency_s))
             if projection_cat_delay_s is None:
                 cat_delay_proj = (
                     CAT_MANUAL_PROJECTION_DELAY_S
@@ -1204,7 +1209,7 @@ def apply_second_phase(
     if eventtype not in ("STRENGTHEN", "REVERSE"):
         return times, vs_pl, vs_ca, None, sense_pl, sense_cat_exec, sense_cat_cmd
 
-    latency = float(np.clip(decision_latency_s, 0.6, 1.4))
+    latency = float(max(0.6, decision_latency_s))
     t2_issue = float(max(0.0, min(tgo, t_classify + latency)))
     t_rem = max(0.0, tgo - t2_issue)
     if t_rem <= dt:
@@ -1635,6 +1640,8 @@ def run_batch(
         reversal_t_detect: Optional[float] = None
         reversal_tau_detect: Optional[float] = None
 
+        dropout_cycles_remaining = 1 if rng.random() < COORDINATION_DROPOUT_PROB else 0
+
         for phase in range(MAX_MANEUVER_PHASES):
             if current_times.size == 0:
                 break
@@ -1644,17 +1651,41 @@ def run_batch(
             else:
                 start_idx = int(np.searchsorted(current_times, eval_start_time - 1e-9, side="left"))
 
-            times_eval = current_times[start_idx:]
+            if start_idx >= current_times.size:
+                break
+
+            stride = max(1, int(round(TCAS_UPDATE_PERIOD_S / dt)))
+            offset = start_idx % stride
+            first_cycle_idx = start_idx if offset == 0 else start_idx + (stride - offset)
+            first_cycle_idx = min(first_cycle_idx, current_times.size - 1)
+            cycle_indices = np.arange(first_cycle_idx, current_times.size, stride, dtype=int)
+            if cycle_indices.size == 0:
+                sample_indices = np.array([current_times.size - 1], dtype=int)
+            else:
+                sample_indices = cycle_indices
+            final_idx = current_times.size - 1
+            if sample_indices.size == 0 or sample_indices[-1] != final_idx:
+                sample_indices = np.append(sample_indices, final_idx)
+            sample_indices = np.unique(sample_indices)
+            sample_indices = sample_indices[sample_indices >= start_idx]
+            if sample_indices.size == 0:
+                break
+
+            times_eval = current_times[sample_indices]
             if times_eval.size == 0:
                 break
 
-            vs_pl_eval = current_vs_pl[start_idx:]
-            vs_ca_eval = current_vs_ca[start_idx:]
-            z_pl_eval = current_z_pl[start_idx:]
-            z_ca_eval = current_z_ca[start_idx:]
+            vs_pl_eval = current_vs_pl[sample_indices]
+            vs_ca_eval = current_vs_ca[sample_indices]
+            z_pl_eval = current_z_pl[sample_indices]
+            z_ca_eval = current_z_ca[sample_indices]
 
-            second_phase_cat_delay = 0.9 if cat_is_apfd else 2.5
+            second_phase_cat_delay_base = 0.9 if cat_is_apfd else 2.5
             decision_latency = float(np.clip(rng.normal(1.0, 0.2), 0.6, 1.4))
+            dropout_active_now = dropout_cycles_remaining > 0
+            dropout_delay_s = TCAS_UPDATE_PERIOD_S if dropout_active_now else 0.0
+            decision_latency_eff = decision_latency + dropout_delay_s
+            second_phase_cat_delay_eff = second_phase_cat_delay_base + dropout_delay_s
 
             eventtype, _, _, t_detect, event_detail = classify_event(
                 times_eval,
@@ -1668,8 +1699,8 @@ def run_batch(
                 sense_chosen_cat=current_sense_chosen,
                 sense_exec_cat=current_sense_cat_exec,
                 manual_case=manual_case,
-                projection_decision_latency_s=decision_latency,
-                projection_cat_delay_s=second_phase_cat_delay,
+                projection_decision_latency_s=decision_latency_eff,
+                projection_cat_delay_s=second_phase_cat_delay_eff,
             )
 
             tau_detect = max(0.0, tgo - t_detect)
@@ -1686,6 +1717,8 @@ def run_batch(
             final_t_detect = float(t_detect)
             final_tau_detect = float(tau_detect)
 
+            dropout_effective = dropout_active_now and eventtype in ("STRENGTHEN", "REVERSE")
+
             record = dict(
                 phase=phase + 1,
                 eventtype=str(eventtype),
@@ -1693,14 +1726,18 @@ def run_batch(
                 t_issue=float(t_detect),
                 tau_issue=float(tau_detect),
                 executed_flip=False,
+                coordination_dropout=bool(dropout_effective),
             )
             maneuver_sequence.append(record)
+
+            if dropout_effective:
+                dropout_cycles_remaining = max(0, dropout_cycles_remaining - 1)
 
             if eventtype not in ("STRENGTHEN", "REVERSE"):
                 break
 
             force_exigent = bool(event_detail == "EXIGENT_STRENGTHEN")
-            latency = float(np.clip(decision_latency, 0.6, 1.4))
+            latency = float(max(0.6, decision_latency_eff))
             t2_issue_est = float(max(0.0, min(tgo, t_detect + latency)))
             z_pl_t2 = float(np.interp(t2_issue_est, current_times, current_z_pl))
             z_cat_t2 = float(np.interp(t2_issue_est, current_times, current_z_ca))
@@ -1734,11 +1771,11 @@ def run_batch(
                 pl_delay=pl_delay,
                 pl_accel_g=PL_ACCEL_G,
                 pl_cap=PL_VS_CAP_FPM,
-                cat_delay=second_phase_cat_delay,
+                cat_delay=second_phase_cat_delay_eff,
                 cat_accel_g=0.35,
                 cat_vs_strength=CAT_STRENGTH_FPM,
                 cat_cap=CAT_CAP_STRENGTH_FPM,
-                decision_latency_s=decision_latency,
+                decision_latency_s=decision_latency_eff,
                 cat_mode=mode,
                 force_exigent=force_exigent,
             )
@@ -1821,7 +1858,24 @@ def run_batch(
             eventtype_initial = "NONE"
         if final_eventtype is None:
             final_eventtype = eventtype_initial
-        if reversal_observed and final_eventtype != "REVERSE":
+        last_entry: Optional[Dict[str, object]]
+        if maneuver_sequence:
+            last_entry = maneuver_sequence[-1]
+            if not isinstance(last_entry, dict):
+                last_entry = None
+        else:
+            last_entry = None
+        last_eventtype_recorded = (
+            str(last_entry.get("eventtype")) if last_entry and "eventtype" in last_entry else None
+        )
+        last_executed_flip = bool(last_entry.get("executed_flip")) if last_entry else False
+
+        if (
+            reversal_observed
+            and final_eventtype != "REVERSE"
+            and last_eventtype_recorded == "REVERSE"
+            and last_executed_flip
+        ):
             final_eventtype = "REVERSE"
             final_event_detail = reversal_detail
             final_t_detect = reversal_t_detect
@@ -1959,6 +2013,8 @@ __all__ = [
     "CAT_APFD_ACCEL_NOM_G",
     "TGO_MIN_S",
     "TGO_MAX_S",
+    "TCAS_UPDATE_PERIOD_S",
+    "COORDINATION_DROPOUT_PROB",
     "ALIM_MARGIN_FT",
     "REVERSAL_MONITOR_DELAY_S",
     "REVERSAL_ENABLE_TAU_S",
