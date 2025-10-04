@@ -38,6 +38,7 @@ from simulation import (
     vs_time_series,
     CAT_MANUAL_ACCEL_NOM_G,
     CAT_MANUAL_DELAY_NOM_S,
+    CAT_APFD_ACCEL_NOM_G,
 )
 
 
@@ -499,6 +500,15 @@ def test_apply_second_phase_force_exigent_strengthen_uses_exigent_profile():
     assert np.allclose(suffix_vs, expected_vs)
 
 
+def _same_sense_reversal_geometry():
+    times = np.array([0.0, 1.0, 2.0, 3.0, 4.0])
+    vs_pl = np.zeros_like(times)
+    vs_ca = np.full_like(times, -1200.0)
+    z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
+    z_ca = integrate_altitude_from_vs(times, vs_ca, 200.0)
+    return times, vs_pl, vs_ca, z_pl, z_ca
+
+
 def test_classify_event_reversal_guard_uses_time_to_go():
     times = np.arange(0.0, 21.0, 1.0)
     sep0 = 1000.0
@@ -616,6 +626,56 @@ def test_classify_event_manual_intruder_delay_waits_before_reversing():
     assert eventtype in {"NONE", "STRENGTHEN"}
     if eventtype == "STRENGTHEN":
         assert event_detail in {None, "EXIGENT_STRENGTHEN"}
+
+
+def test_classify_event_manual_projection_uses_manual_acceleration():
+    times, vs_pl, vs_ca, z_pl, z_ca = _same_sense_reversal_geometry()
+
+    with patch("simulation.STRENGTHEN_PAD_FT", -2000.0), patch(
+        "simulation.reversal_candidate_satisfies_alim", return_value=True
+    ), patch("simulation.vs_time_series", wraps=vs_time_series) as mock_vs:
+        classify_event(
+            times=times,
+            z_pl=z_pl,
+            z_ca=z_ca,
+            vs_pl=vs_pl,
+            vs_ca=vs_ca,
+            tgo=15.0,
+            alim_ft=400.0,
+            margin_ft=100.0,
+            sense_chosen_cat=-1,
+            sense_exec_cat=-1,
+            manual_case=True,
+        )
+
+    assert mock_vs.call_count > 0
+    accel_used = {call.args[3] for call in mock_vs.call_args_list}
+    assert accel_used == {CAT_MANUAL_ACCEL_NOM_G}
+
+
+def test_classify_event_apfd_projection_uses_apfd_acceleration():
+    times, vs_pl, vs_ca, z_pl, z_ca = _same_sense_reversal_geometry()
+
+    with patch("simulation.STRENGTHEN_PAD_FT", -2000.0), patch(
+        "simulation.reversal_candidate_satisfies_alim", return_value=True
+    ), patch("simulation.vs_time_series", wraps=vs_time_series) as mock_vs:
+        classify_event(
+            times=times,
+            z_pl=z_pl,
+            z_ca=z_ca,
+            vs_pl=vs_pl,
+            vs_ca=vs_ca,
+            tgo=15.0,
+            alim_ft=400.0,
+            margin_ft=100.0,
+            sense_chosen_cat=-1,
+            sense_exec_cat=-1,
+            manual_case=False,
+        )
+
+    assert mock_vs.call_count > 0
+    accel_used = {call.args[3] for call in mock_vs.call_args_list}
+    assert accel_used == {CAT_APFD_ACCEL_NOM_G}
 
 
 def test_classify_event_delayed_compliance_strengthens_not_reverses():
