@@ -26,6 +26,8 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import streamlit as st
 
+from inspector_utils import get_second_issue_time
+
 from preview_filters import (
     LOWEST_SEPARATION_WINDOW_FT,
     build_preview_dataframe,
@@ -851,8 +853,9 @@ with tabs[1]:
                     label=f"±ALIM at FL{FL_pl}",
                 )
                 ax_run.axhline(0, ls='--', lw=1, alpha=0.6)
-                if not pd.isna(row['t_second_issue']):
-                    ax_run.axvline(float(row['t_second_issue']), ls=':', lw=1, alpha=0.7, label='2nd‑phase issue')
+                t_second_issue = get_second_issue_time(row)
+                if t_second_issue is not None:
+                    ax_run.axvline(t_second_issue, ls=':', lw=1, alpha=0.7, label='2nd‑phase issue')
                 if cat_td is not None:
                     ax_run.axvline(
                         float(cat_td),

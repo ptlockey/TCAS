@@ -2,11 +2,13 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pandas.testing as pdt
 from unittest.mock import patch
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
+from inspector_utils import get_second_issue_time
 from simulation import (
     CAT_CAP_INIT_FPM,
     CAT_CAP_STRENGTH_FPM,
@@ -946,6 +948,56 @@ def test_run_batch_records_maneuver_sequence():
         if second_issue is not None and not np.isnan(second_issue):
             assert second_issue >= first["t_issue"]
             assert np.isclose(row["tau_second_issue"], row["tgos"] - second_issue)
+
+
+def test_run_inspector_handles_missing_second_issue_column():
+    df = pd.DataFrame(
+        [
+            {
+                "run": 1,
+                "eventtype": "STRENGTHEN",
+                "sensePL_final": 0,
+                "senseCAT_final": 0,
+            }
+        ]
+    )
+
+    second_issue_time = get_second_issue_time(df.iloc[0])
+    assert second_issue_time is None
+
+
+def test_run_inspector_ignores_nan_second_issue_value():
+    df = pd.DataFrame(
+        [
+            {
+                "run": 2,
+                "eventtype": "REVERSE",
+                "sensePL_final": 1,
+                "senseCAT_final": -1,
+                "t_second_issue": float("nan"),
+            }
+        ]
+    )
+
+    second_issue_time = get_second_issue_time(df.iloc[0])
+    assert second_issue_time is None
+
+
+def test_run_inspector_returns_second_issue_time_when_available():
+    df = pd.DataFrame(
+        [
+            {
+                "run": 3,
+                "eventtype": "STRENGTHEN",
+                "sensePL_final": -1,
+                "senseCAT_final": 1,
+                "t_second_issue": 12.5,
+            }
+        ]
+    )
+
+    second_issue_time = get_second_issue_time(df.iloc[0])
+    assert second_issue_time == 12.5
 
 
 def test_run_batch_same_sense_reversal_rate_with_hold():
