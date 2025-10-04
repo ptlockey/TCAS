@@ -16,6 +16,7 @@ Implements the requested amendments on top of your functioning codebase:
 from __future__ import annotations
 
 import json
+from bisect import bisect_left
 from typing import Optional, Tuple
 
 import numpy as np
@@ -80,6 +81,29 @@ def sanitize_apfd_config(option: str, share_value: Optional[float]) -> Tuple[str
         share = APFD_DEFAULT_SHARE
     share = float(np.clip(share, 0.0, 1.0))
     return APFD_DEFAULT_MODE, share
+
+
+def clamp_to_available_run(value: int, run_options: list[int]) -> int:
+    """Snap ``value`` to the closest available run identifier."""
+
+    if not run_options:
+        raise ValueError("run_options must not be empty")
+
+    value = int(value)
+    if value <= run_options[0]:
+        return run_options[0]
+    if value >= run_options[-1]:
+        return run_options[-1]
+
+    idx = bisect_left(run_options, value)
+    if idx < len(run_options) and run_options[idx] == value:
+        return value
+
+    prev_run = run_options[idx - 1]
+    next_run = run_options[idx] if idx < len(run_options) else run_options[-1]
+    if abs(prev_run - value) <= abs(next_run - value):
+        return prev_run
+    return next_run
 
 # ------------------------------- Streamlit UI -------------------------------
 
@@ -660,15 +684,68 @@ with tabs[1]:
                 st.info("Run inspection is unavailable because no runs satisfy the current preview filters.")
             else:
                 run_options = sorted(set(preview_df['run'].astype(int)))
-                rid = st.select_slider(
-                    "Run id",
-                    options=run_options,
-                    value=run_options[0],
-                    help=(
-                        "Step through runs that match the preview filters above."
-                        " Adjust the filters to widen or narrow this subset."
+                run_selection_key = "preview_run_selection"
+                run_input_key = "preview_run_input"
+                run_prev_key = "preview_run_prev"
+                run_next_key = "preview_run_next"
+
+                current_selection = st.session_state.get(run_selection_key, run_options[0])
+                current_selection = clamp_to_available_run(current_selection, run_options)
+                st.session_state[run_selection_key] = current_selection
+
+                if run_input_key not in st.session_state:
+                    st.session_state[run_input_key] = current_selection
+                else:
+                    st.session_state[run_input_key] = clamp_to_available_run(
+                        st.session_state[run_input_key], run_options
                     )
-                )
+
+                prev_col, input_col, next_col = st.columns([1, 3, 1])
+                with prev_col:
+                    prev_clicked = st.button(
+                        "◀",
+                        key=run_prev_key,
+                        disabled=current_selection == run_options[0],
+                        use_container_width=True,
+                    )
+                with next_col:
+                    next_clicked = st.button(
+                        "▶",
+                        key=run_next_key,
+                        disabled=current_selection == run_options[-1],
+                        use_container_width=True,
+                    )
+                with input_col:
+                    st.number_input(
+                        "Run id",
+                        min_value=int(run_options[0]),
+                        max_value=int(run_options[-1]),
+                        step=1,
+                        key=run_input_key,
+                        help=(
+                            "Step through runs that match the preview filters above."
+                            " Adjust the filters to widen or narrow this subset."
+                        ),
+                    )
+
+                updated_selection = current_selection
+                if prev_clicked:
+                    idx = run_options.index(current_selection)
+                    if idx > 0:
+                        updated_selection = run_options[idx - 1]
+                elif next_clicked:
+                    idx = run_options.index(current_selection)
+                    if idx < len(run_options) - 1:
+                        updated_selection = run_options[idx + 1]
+                else:
+                    updated_selection = clamp_to_available_run(
+                        st.session_state.get(run_input_key, current_selection),
+                        run_options,
+                    )
+
+                st.session_state[run_selection_key] = updated_selection
+                st.session_state[run_input_key] = updated_selection
+                rid = updated_selection
                 row = preview_df[preview_df['run'] == rid].iloc[0]
 
                 # Reconstruct manoeuvre histories using stored data when available.
