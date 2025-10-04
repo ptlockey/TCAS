@@ -39,6 +39,7 @@ from simulation import (
     CAT_MANUAL_ACCEL_NOM_G,
     CAT_MANUAL_DELAY_NOM_S,
     CAT_APFD_ACCEL_NOM_G,
+    TCAS_UPDATE_PERIOD_S,
 )
 
 
@@ -964,6 +965,66 @@ def test_run_batch_deterministic_seed():
 
     assert len(df1) == len(df2) == 20
     pdt.assert_frame_equal(df1.reset_index(drop=True), df2.reset_index(drop=True))
+
+
+def test_run_batch_classify_event_samples_one_hz():
+    captured_times = []
+    original_classify = classify_event
+
+    def capture(times, *args, **kwargs):
+        captured_times.append(np.array(times, copy=True))
+        return original_classify(times, *args, **kwargs)
+
+    with patch("simulation.classify_event", new=capture):
+        run_batch(
+            runs=3,
+            seed=246,
+            jitter_priors=False,
+            use_delay_mixture=False,
+            apfd_share=0.0,
+        )
+
+    regular_diffs: List[float] = []
+    for arr in captured_times:
+        series = np.asarray(arr, dtype=float)
+        if series.size < 2:
+            continue
+        diffs = np.diff(series)
+        if diffs.size > 1:
+            regular_diffs.extend(diffs[:-1])
+        if diffs.size >= 1:
+            assert diffs[-1] <= TCAS_UPDATE_PERIOD_S + 1e-6
+
+    assert regular_diffs, "expected at least one full TCAS cycle interval"
+    assert np.allclose(regular_diffs, TCAS_UPDATE_PERIOD_S, atol=1e-9)
+
+
+def test_run_batch_coordination_dropout_deterministic_with_forced_rate():
+    kwargs = dict(
+        runs=10,
+        seed=777,
+        jitter_priors=False,
+        use_delay_mixture=False,
+        apfd_share=0.0,
+    )
+
+    with patch("simulation.COORDINATION_DROPOUT_PROB", 1.0):
+        df1 = run_batch(**kwargs)
+    with patch("simulation.COORDINATION_DROPOUT_PROB", 1.0):
+        df2 = run_batch(**kwargs)
+
+    pdt.assert_frame_equal(df1.reset_index(drop=True), df2.reset_index(drop=True))
+
+    any_dropout = False
+    for _, row in df1.iterrows():
+        seq = row["maneuver_sequence"]
+        if not isinstance(seq, tuple):
+            continue
+        if any(entry.get("coordination_dropout") for entry in seq):
+            any_dropout = True
+            break
+
+    assert any_dropout, "forced dropout probability should trigger at least one skip"
 
 
 def test_run_batch_records_maneuver_sequence():
