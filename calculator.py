@@ -204,21 +204,8 @@ with st.sidebar:
             format="%.3f",
             help="Probability that a manually flown intruder flies the opposite sense of the commanded RA.",
         )
-        same_rate = st.checkbox(
-            "AP/FD crews use the manual opposite-sense rate",
-            value=True,
-            help="Disable to enter a bespoke opposite-sense rate for AP/FD crews.",
-        )
-        if same_rate:
-            p_opp_apfd = None
-        else:
-            p_opp_apfd = st.number_input(
-                "AP/FD P(opposite-sense)",
-                value=float(p_opp_manual),
-                step=0.001,
-                format="%.3f",
-                help="Probability that an AP/FD-flown intruder flies the opposite sense of the commanded RA.",
-            )
+        st.caption("AP/FD crews are modelled as always flying the commanded sense (P(opposite-sense) = 0).")
+        p_opp_apfd = 0.0
         p_ta = st.number_input(
             "P(no-response / TA-only)",
             value=0.075,
@@ -243,8 +230,8 @@ with st.sidebar:
         if use_alt_bands:
             default_json = json.dumps(
                 [
-                    {"alt_min_ft": 0.0, "alt_max_ft": 10000.0, "manual": 0.02, "apfd": 0.01},
-                    {"alt_min_ft": 10000.0, "alt_max_ft": 20000.0, "manual": 0.03, "apfd": 0.015},
+                    {"alt_min_ft": 0.0, "alt_max_ft": 10000.0, "manual": 0.02},
+                    {"alt_min_ft": 10000.0, "alt_max_ft": 20000.0, "manual": 0.03},
                 ],
                 indent=2,
             )
@@ -253,8 +240,8 @@ with st.sidebar:
                 value=default_json,
                 height=180,
                 help=(
-                    "Provide a JSON list of objects with keys 'alt_min_ft', 'alt_max_ft', 'manual', and optional 'apfd'. "
-                    "Bands are applied in order to determine the opposite-sense probability."
+                    "Provide a JSON list of objects with keys 'alt_min_ft', 'alt_max_ft', and 'manual'. "
+                    "Any AP/FD-specific values will be ignored because automation always follows the commanded sense."
                 ),
             )
             try:
@@ -268,13 +255,22 @@ with st.sidebar:
                     alt_min = float(item["alt_min_ft"])
                     alt_max = float(item["alt_max_ft"])
                     manual = float(item["manual"])
-                    apfd = item.get("apfd")
+                    apfd_raw = item.get("apfd")
+                    if apfd_raw not in (None, 0, 0.0, "0", "0.0"):
+                        try:
+                            apfd_val = float(apfd_raw)
+                        except (TypeError, ValueError) as exc:  # noqa: PERF203
+                            raise ValueError("AP/FD probabilities must be numeric when provided") from exc
+                        if abs(apfd_val) > 1e-9:
+                            st.info(
+                                "AP/FD opposite-sense entries are clamped to zero; ignoring provided value."
+                            )
                     opp_bands.append(
                         OppositeSenseBand(
                             alt_min_ft=alt_min,
                             alt_max_ft=alt_max,
                             manual_prob=manual,
-                            apfd_prob=None if apfd is None else float(apfd),
+                            apfd_prob=0.0,
                         )
                     )
             except Exception as exc:  # noqa: BLE001

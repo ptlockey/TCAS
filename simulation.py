@@ -68,6 +68,20 @@ MAX_MANEUVER_PHASES = 4
 VS_SENSE_DEADBAND_FPM = 50.0
 
 
+def _normalise_mode_key(value: Optional[str]) -> str:
+    """Return a lowercase alpha-numeric mode key for comparisons."""
+
+    if value is None:
+        return ""
+    return "".join(ch for ch in value.lower() if ch.isalnum())
+
+
+def _is_apfd_mode(value: Optional[str]) -> bool:
+    """Return True when the provided mode label corresponds to AP/FD usage."""
+
+    return _normalise_mode_key(value) == "apfd"
+
+
 def sanitize_tgo_bounds(
     tgo_min_s: Optional[float], tgo_max_s: Optional[float]
 ) -> Tuple[float, float, float]:
@@ -471,20 +485,19 @@ class OppositeSenseModel:
     jitter_range: Tuple[float, float] = (0.7, 1.3)
 
     def _baseline_for_mode(self, mode: str) -> float:
-        mode_key = mode.lower()
-        if mode_key in {"apfd", "ap/ fd", "ap_fd", "ap fd"}:
-            base = self.apfd_baseline if self.apfd_baseline is not None else self.manual_baseline
-        else:
-            base = self.manual_baseline
+        if _is_apfd_mode(mode):
+            return 0.0
+
+        base = self.manual_baseline
         return float(np.clip(base, 0.0, 1.0))
 
     def _prob_from_bands(self, mode: str, altitude_ft: float) -> Optional[float]:
+        if _is_apfd_mode(mode):
+            return 0.0
+
         for band in self.altitude_bands:
             if band.contains(altitude_ft):
-                if mode.lower() in {"apfd", "ap/ fd", "ap_fd", "ap fd"}:
-                    prob = band.apfd_prob if band.apfd_prob is not None else band.manual_prob
-                else:
-                    prob = band.manual_prob
+                prob = band.manual_prob
                 return float(np.clip(prob, 0.0, 1.0))
         return None
 
@@ -499,6 +512,9 @@ class OppositeSenseModel:
 
         if altitude_ft is None:
             altitude_ft = 0.0
+
+        if _is_apfd_mode(mode):
+            return 0.0
 
         prob = self._prob_from_bands(mode, altitude_ft)
         if prob is None:
@@ -609,12 +625,17 @@ def apply_non_compliance_to_cat(
 ) -> Tuple[str, int, float, float, float, float]:
     if opposite_model is None:
         opposite_model = OppositeSenseModel()
-    p_opp = opposite_model.probability(
-        rng,
-        mode=cat_mode_key,
-        altitude_ft=cat_alt_ft,
-        jitter_override=jitter,
-    )
+
+    apfd_mode = _is_apfd_mode(cat_mode_key) or _is_apfd_mode(mode_label_override)
+    if apfd_mode:
+        p_opp = 0.0
+    else:
+        p_opp = opposite_model.probability(
+            rng,
+            mode=cat_mode_key,
+            altitude_ft=cat_alt_ft,
+            jitter_override=jitter,
+        )
 
     if jitter:
         p_taonly = max(0.0, min(1.0, p_taonly * rng.uniform(0.7, 1.3)))
@@ -629,7 +650,7 @@ def apply_non_compliance_to_cat(
             return mode_label_override
         return f"{outcome} ({mode_label_override})"
 
-    if u < p_opp:
+    if not apfd_mode and u < p_opp:
         compliant_accel = float(np.clip(base_accel_g, 0.20, 0.25))
         return (
             label_for("opposite-sense"),
