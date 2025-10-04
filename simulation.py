@@ -290,6 +290,26 @@ def time_to_go_from_geometry(r0_nm: float, v_closure_kt: float) -> Optional[floa
     return 3600.0 * (r0_nm / v_closure_kt)
 
 
+def derive_single_run_geometry(
+    initial_range_nm: float,
+    closure_kt: float,
+    use_custom_tgo: bool,
+    tgo_window: Optional[Tuple[float, float, float]],
+) -> Tuple[Optional[float], float]:
+    """Return (t_cpa, effective_initial_range_nm) for the single-run demo."""
+
+    initial_range_effective = float(initial_range_nm)
+
+    if use_custom_tgo and tgo_window is not None and closure_kt > 1e-6:
+        lo, hi, _ = tgo_window
+        t_cpa = float(np.clip(hi, lo, hi))
+        initial_range_effective = (closure_kt * t_cpa) / 3600.0
+        return t_cpa, initial_range_effective
+
+    t_cpa = time_to_go_from_geometry(initial_range_effective, closure_kt)
+    return t_cpa, initial_range_effective
+
+
 def sample_headings(
     rng: np.random.Generator,
     scenario: str,
