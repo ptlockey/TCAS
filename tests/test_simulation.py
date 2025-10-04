@@ -763,6 +763,13 @@ def test_classify_event_reversal_not_selected_when_cpa_worsens():
         assert event_detail in {None, "EXIGENT_STRENGTHEN"}
 
 
+def test_reversal_candidate_satisfies_alim_gate():
+    from simulation import reversal_candidate_satisfies_alim
+
+    assert not reversal_candidate_satisfies_alim(499.0, 400.0, 100.0)
+    assert reversal_candidate_satisfies_alim(500.0, 400.0, 100.0)
+
+
 def test_classify_event_same_sense_improvement_hold_defers_reversal():
     closure_fps = 20.0
     times = np.array([0.0, 0.4, 0.8, 1.2, 1.6, 2.0, 2.4, 2.8])

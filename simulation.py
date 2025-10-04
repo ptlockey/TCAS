@@ -485,6 +485,15 @@ def apply_non_compliance_to_cat(
 # ------------------------- Event classification -------------------------
 
 
+def reversal_candidate_satisfies_alim(
+    cpa_reverse: float, alim_ft: float, margin_ft: float
+) -> bool:
+    """Return True when a reversal projection meets the ALIM + margin gate."""
+
+    reverse_threshold_ft = alim_ft + margin_ft
+    return cpa_reverse >= reverse_threshold_ft
+
+
 def classify_event(
     times: np.ndarray,
     z_pl: np.ndarray,
@@ -754,10 +763,7 @@ def classify_event(
             cpa_continue = float(np.min(sep_continue))
             cpa_reverse = float(np.min(sep_reverse))
 
-            reverse_alim_ok = cpa_reverse >= (alim_ft + margin_ft)
-            reverse_better = cpa_reverse > cpa_continue + 1e-3
-
-            if not (reverse_alim_ok or reverse_better):
+            if not reversal_candidate_satisfies_alim(cpa_reverse, alim_ft, margin_ft):
                 prev_time = float(t_now)
                 continue
 
