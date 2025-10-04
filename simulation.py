@@ -58,6 +58,7 @@ REVERSAL_INTERLOCK_LOOKBACK_S = 1.8
 REVERSAL_IMPROVEMENT_HOLD_S = 1.6
 REVERSAL_HOLD_DISABLE_TAU_S = 18.0
 PREDICTED_MISS_IMPROVEMENT_TOL_FT = 5.0
+REVERSAL_CPA_IMPROVEMENT_TOL_FT = 10.0
 
 # Safeguard for repeated manoeuvre phases
 MAX_MANEUVER_PHASES = 4
@@ -697,6 +698,8 @@ def classify_event(
         t_remaining = float(times[-1] - t_now)
         times_future = times[idx:]
         z_pl_future = z_pl[idx:]
+        cpa_continue: Optional[float] = None
+        cpa_reverse: Optional[float] = None
         if t_remaining > 1e-6 and times_future.size >= 2:
             dt_future = float(np.min(np.diff(times_future)))
             if dt_future <= 1e-6 and times.size >= 2:
@@ -766,6 +769,14 @@ def classify_event(
             if not reversal_candidate_satisfies_alim(cpa_reverse, alim_ft, margin_ft):
                 prev_time = float(t_now)
                 continue
+
+            if cpa_continue <= cpa_reverse + REVERSAL_CPA_IMPROVEMENT_TOL_FT:
+                prev_time = float(t_now)
+                continue
+
+        if cpa_reverse is None or cpa_continue is None:
+            prev_time = float(t_now)
+            continue
 
         if enough_vs:
             event_detail = "Geometry shortfall"
