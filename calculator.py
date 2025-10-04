@@ -689,8 +689,12 @@ with tabs[1]:
                 cat_vs0_init = float(row.get("cat_vs0_init", 0.0))
 
                 history_data = None
+                cat_td = None
                 if "time_history_json" in row.index:
                     history_data = decode_time_history(row["time_history_json"])
+
+                if "catDelay" in row.index and not pd.isna(row["catDelay"]):
+                    cat_td = float(row["catDelay"])
 
                 if history_data is not None:
                     times = history_data["times"]
@@ -708,11 +712,12 @@ with tabs[1]:
                 else:
                     sense_pl = int(row["sensePL"])
                     sense_cat_exec = int(row["senseCAT_exec"])
-                    cat_td = float(row["catDelay"])
                     cat_ag = float(row["catAccel_g"])
                     cat_vs = float(row["catVS_cmd"])
                     cat_cap = float(row["catCap_cmd"])
                     pl_delay = float(row["plDelay"])
+
+                    cat_td_for_series = 0.0 if cat_td is None else cat_td
 
                     times, vs_pl = vs_time_series(
                         tgo,
@@ -727,7 +732,7 @@ with tabs[1]:
                     _, vs_ca = vs_time_series(
                         tgo,
                         0.1,
-                        cat_td,
+                        cat_td_for_series,
                         cat_ag,
                         cat_vs,
                         sense=sense_cat_exec,
@@ -771,12 +776,23 @@ with tabs[1]:
                 ax_run.axhline(0, ls='--', lw=1, alpha=0.6)
                 if not pd.isna(row['t_second_issue']):
                     ax_run.axvline(float(row['t_second_issue']), ls=':', lw=1, alpha=0.7, label='2nd‑phase issue')
+                if cat_td is not None:
+                    ax_run.axvline(
+                        float(cat_td),
+                        color='tab:orange',
+                        ls='--',
+                        lw=1.2,
+                        alpha=0.85,
+                        label='CAT response delay',
+                    )
                 ax_run.set_xlabel("Time since RA trigger (s)")
                 ax_run.set_ylabel("Relative altitude (ft)")
                 ax_run.set_title(f"Run {int(row['run'])} — {row['eventtype']} — Δh@CPA={miss_cpa:.0f} ft")
                 ax_run.legend(); ax_run.grid(True, alpha=0.3)
                 st.pyplot(fig_run)
-                st.caption("Shaded band visualises ±ALIM around the protected aircraft during the sampled run.")
+                st.caption(
+                    "Shaded band visualises ±ALIM around the protected aircraft; the vertical marker shows the CAT response delay."
+                )
 
 
         # Download
