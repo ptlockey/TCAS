@@ -963,3 +963,119 @@ def test_run_batch_apfd_sense_matches_fast_template():
             mismatches += 1
 
     assert mismatches == 0, f"Unexpected sense mismatch count: {mismatches}"
+
+
+def test_manual_reversal_requires_delayed_cpa_improvement():
+    dt = 0.5
+    sense_pl = +1
+    sense_cat = +1
+    initial_offset_ft = -800.0
+    t_classify = 6.0
+    decision_latency = 1.4
+    latency = float(np.clip(decision_latency, 0.6, 1.4))
+
+    for tgo, expect_flip in ((10.0, False), (15.0, True)):
+        times, vs_pl = vs_time_series(
+            tgo,
+            dt,
+            PL_DELAY_MEAN_S,
+            PL_ACCEL_G,
+            PL_VS_FPM,
+            sense=sense_pl,
+            cap_fpm=PL_VS_CAP_FPM,
+        )
+        _, vs_ca = vs_time_series(
+            tgo,
+            dt,
+            2.5,
+            0.25,
+            CAT_INIT_VS_FPM,
+            sense=sense_cat,
+            cap_fpm=CAT_CAP_INIT_FPM,
+        )
+
+        z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
+        z_ca = integrate_altitude_from_vs(times, vs_ca, initial_offset_ft)
+
+        t2_issue_est = float(max(0.0, min(tgo, t_classify + latency)))
+        z_pl_t2 = float(np.interp(t2_issue_est, times, z_pl))
+        z_ca_t2 = float(np.interp(t2_issue_est, times, z_ca))
+        vs_pl_now = float(np.interp(t2_issue_est, times, vs_pl))
+        vs_ca_now = float(np.interp(t2_issue_est, times, vs_ca))
+        t_rem = max(0.0, tgo - t2_issue_est)
+
+        cpas = {}
+        for label, next_sense_pl, next_sense_cat in (
+            ("keep", sense_pl, sense_cat),
+            ("flip", -sense_pl, -sense_cat),
+        ):
+            t_rel, vs_pl_candidate = vs_time_series(
+                t_rem,
+                dt,
+                PL_DELAY_MEAN_S,
+                PL_ACCEL_G,
+                PL_VS_FPM,
+                sense=next_sense_pl,
+                cap_fpm=PL_VS_CAP_FPM,
+                vs0_fpm=vs_pl_now,
+            )
+            _, vs_ca_candidate = vs_time_series(
+                t_rem,
+                dt,
+                2.5,
+                0.35,
+                CAT_INIT_VS_FPM,
+                sense=next_sense_cat,
+                cap_fpm=CAT_CAP_INIT_FPM,
+                vs0_fpm=vs_ca_now,
+            )
+            z_pl_candidate = integrate_altitude_from_vs(t_rel, vs_pl_candidate, z_pl_t2)
+            z_ca_candidate = integrate_altitude_from_vs(t_rel, vs_ca_candidate, z_ca_t2)
+            sep_candidate = np.abs(z_pl_candidate - z_ca_candidate)
+            cpas[label] = float(np.min(sep_candidate))
+
+        (
+            _,
+            _,
+            _,
+            t_issue,
+            new_sense_pl,
+            new_sense_cat_exec,
+            new_sense_cat_cmd,
+        ) = apply_second_phase(
+            times,
+            vs_pl,
+            vs_ca,
+            tgo,
+            dt,
+            eventtype="REVERSE",
+            sense_pl=sense_pl,
+            sense_cat_exec=sense_cat,
+            sense_cat_cmd=sense_cat,
+            pl_vs0=0.0,
+            cat_vs0=0.0,
+            t_classify=t_classify,
+            z_pl_t2=z_pl_t2,
+            z_cat_t2=z_ca_t2,
+            pl_delay=PL_DELAY_MEAN_S,
+            pl_accel_g=PL_ACCEL_G,
+            pl_cap=PL_VS_CAP_FPM,
+            cat_delay=2.5,
+            cat_accel_g=0.35,
+            cat_vs_strength=CAT_INIT_VS_FPM,
+            cat_cap=CAT_CAP_INIT_FPM,
+            decision_latency_s=decision_latency,
+        )
+
+        assert t_issue is not None
+
+        if expect_flip:
+            assert cpas["flip"] > cpas["keep"] + 1e-3
+            assert new_sense_pl == -sense_pl
+            assert new_sense_cat_exec == -sense_cat
+            assert new_sense_cat_cmd == -sense_cat
+        else:
+            assert cpas["keep"] >= cpas["flip"] - 1e-3
+            assert new_sense_pl == sense_pl
+            assert new_sense_cat_exec == sense_cat
+            assert new_sense_cat_cmd == sense_cat

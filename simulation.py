@@ -497,6 +497,8 @@ def classify_event(
     sense_chosen_cat: int,
     sense_exec_cat: int,
     manual_case: bool = False,
+    projection_decision_latency_s: Optional[float] = None,
+    projection_cat_delay_s: Optional[float] = None,
 ) -> Tuple[str, float, float, float, Optional[str]]:
     """Return (event_label, minsep, sep@CPA, t_detect, event_detail)."""
 
@@ -704,6 +706,16 @@ def classify_event(
             )
             accel_proj = 0.25 if manual_case else 0.35
 
+            latency_proj = 1.0 if projection_decision_latency_s is None else float(
+                projection_decision_latency_s
+            )
+            latency_proj = float(np.clip(latency_proj, 0.6, 1.4))
+            if projection_cat_delay_s is None:
+                cat_delay_proj = 2.5 if manual_case else 0.9
+            else:
+                cat_delay_proj = float(max(0.0, projection_cat_delay_s))
+            response_effective_s = latency_proj + cat_delay_proj
+
             t_rel, vs_ca_continue = vs_time_series(
                 t_remaining,
                 dt_future,
@@ -714,16 +726,21 @@ def classify_event(
                 cap_fpm=CAT_CAP_INIT_FPM,
                 vs0_fpm=vs_ca_now,
             )
-            _, vs_ca_reverse = vs_time_series(
-                t_remaining,
-                dt_future,
-                0.0,
-                accel_proj,
-                target_mag,
-                sense=-sense_current,
-                cap_fpm=CAT_CAP_INIT_FPM,
-                vs0_fpm=vs_ca_now,
-            )
+            vs_ca_reverse = vs_ca_continue.copy()
+
+            if response_effective_s < t_remaining - 1e-6:
+                vs_at_effective = float(np.interp(response_effective_s, t_rel, vs_ca_continue))
+                target_signed = -sense_current * target_mag
+                a = accel_proj * G
+                a_fpm_s = a * FT_PER_M * 60.0
+
+                for j, t_rel_j in enumerate(t_rel):
+                    if t_rel_j <= response_effective_s + 1e-9:
+                        continue
+                    te = t_rel_j - response_effective_s
+                    delta = target_signed - vs_at_effective
+                    step = math.copysign(min(abs(a_fpm_s * te), abs(delta)), delta)
+                    vs_ca_reverse[j] = vs_at_effective + step
 
             z_ca_continue = integrate_altitude_from_vs(t_rel, vs_ca_continue, z_ca_now)
             z_ca_reverse = integrate_altitude_from_vs(t_rel, vs_ca_reverse, z_ca_now)
@@ -1226,6 +1243,9 @@ def run_batch(
             z_pl_eval = current_z_pl[start_idx:]
             z_ca_eval = current_z_ca[start_idx:]
 
+            second_phase_cat_delay = 0.9 if cat_is_apfd else 2.5
+            decision_latency = float(np.clip(rng.normal(1.0, 0.2), 0.6, 1.4))
+
             eventtype, _, _, t_detect, event_detail = classify_event(
                 times_eval,
                 z_pl_eval,
@@ -1238,6 +1258,8 @@ def run_batch(
                 sense_chosen_cat=current_sense_chosen,
                 sense_exec_cat=current_sense_cat_exec,
                 manual_case=manual_case,
+                projection_decision_latency_s=decision_latency,
+                projection_cat_delay_s=second_phase_cat_delay,
             )
 
             tau_detect = max(0.0, tgo - t_detect)
@@ -1272,8 +1294,6 @@ def run_batch(
                 break
 
             force_exigent = bool(event_detail == "EXIGENT_STRENGTHEN")
-            second_phase_cat_delay = 0.9 if cat_is_apfd else 2.5
-            decision_latency = float(np.clip(rng.normal(1.0, 0.2), 0.6, 1.4))
             latency = float(np.clip(decision_latency, 0.6, 1.4))
             t2_issue_est = float(max(0.0, min(tgo, t_detect + latency)))
             z_pl_t2 = float(np.interp(t2_issue_est, current_times, current_z_pl))
