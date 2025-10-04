@@ -695,12 +695,10 @@ with tabs[1]:
                 current_selection = clamp_to_available_run(current_selection, run_options)
                 st.session_state[run_selection_key] = current_selection
 
-                if run_input_key not in st.session_state:
-                    st.session_state[run_input_key] = current_selection
-                else:
-                    st.session_state[run_input_key] = clamp_to_available_run(
-                        st.session_state[run_input_key], run_options
-                    )
+                current_input_value = clamp_to_available_run(
+                    st.session_state.get(run_input_key, current_selection),
+                    run_options,
+                )
 
                 prev_col, input_col, next_col = st.columns([1, 3, 1])
                 with prev_col:
@@ -717,19 +715,6 @@ with tabs[1]:
                         disabled=current_selection == run_options[-1],
                         use_container_width=True,
                     )
-                with input_col:
-                    st.number_input(
-                        "Run id",
-                        min_value=int(run_options[0]),
-                        max_value=int(run_options[-1]),
-                        step=1,
-                        key=run_input_key,
-                        help=(
-                            "Step through runs that match the preview filters above."
-                            " Adjust the filters to widen or narrow this subset."
-                        ),
-                    )
-
                 updated_selection = current_selection
                 if prev_clicked:
                     idx = run_options.index(current_selection)
@@ -740,13 +725,25 @@ with tabs[1]:
                     if idx < len(run_options) - 1:
                         updated_selection = run_options[idx + 1]
                 else:
-                    updated_selection = clamp_to_available_run(
-                        st.session_state.get(run_input_key, current_selection),
-                        run_options,
-                    )
+                    updated_selection = current_input_value
 
                 st.session_state[run_selection_key] = updated_selection
                 st.session_state[run_input_key] = updated_selection
+
+                with input_col:
+                    st.number_input(
+                        "Run id",
+                        min_value=int(run_options[0]),
+                        max_value=int(run_options[-1]),
+                        step=1,
+                        key=run_input_key,
+                        value=int(updated_selection),
+                        help=(
+                            "Step through runs that match the preview filters above."
+                            " Adjust the filters to widen or narrow this subset."
+                        ),
+                    )
+
                 rid = updated_selection
                 row = preview_df[preview_df['run'] == rid].iloc[0]
 
