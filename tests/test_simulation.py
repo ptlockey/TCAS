@@ -27,6 +27,8 @@ from simulation import (
     ias_to_tas,
     OppositeSenseModel,
     OppositeSenseBand,
+    decode_time_history,
+    extend_history_with_pretrigger,
     run_batch,
     vs_time_series,
 )
@@ -1340,3 +1342,117 @@ def test_run_batch_apfd_opposite_sense_zero_rate():
         df.loc[mask, "senseCAT_exec"] == -df.loc[mask, "senseCAT_chosen"]
     ).mean()
     assert np.isclose(wrong_share, 0.0)
+
+
+def test_run_batch_records_final_history_and_senses():
+    expected_times = np.array([0.0, 1.0, 2.0])
+
+    def fake_non_compliance(
+        rng,
+        sense_cat,
+        base_delay_s,
+        base_accel_g,
+        vs_fpm,
+        cap_fpm,
+        **kwargs,
+    ):
+        return ("manual", sense_cat, base_delay_s, base_accel_g, vs_fpm, cap_fpm)
+
+    def fake_classify(*args, **kwargs):
+        call = fake_classify.calls
+        fake_classify.calls += 1
+        if call == 0:
+            return ("REVERSE", 0.0, 0.0, 5.0, "Opposite sense")
+        return ("NONE", 0.0, 0.0, 19.0, None)
+
+    fake_classify.calls = 0
+
+    def fake_second_phase(
+        times,
+        vs_pl,
+        vs_ca,
+        tgo,
+        dt,
+        eventtype,
+        sense_pl,
+        sense_cat_exec,
+        sense_cat_cmd,
+        **kwargs,
+    ):
+        pl_vs0 = kwargs.get("pl_vs0", 0.0)
+        cat_vs0 = kwargs.get("cat_vs0", 0.0)
+        new_vs_pl = np.array([pl_vs0, -500.0, -800.0])
+        new_vs_ca = np.array([cat_vs0, 400.0, 700.0])
+        return (
+            expected_times,
+            new_vs_pl,
+            new_vs_ca,
+            6.0,
+            -sense_pl,
+            -sense_cat_exec,
+            -sense_cat_cmd,
+        )
+
+    with patch("simulation.sample_altitudes_and_h0", return_value=(200, 210, 300.0)), \
+        patch(
+            "simulation.sample_initial_vs_with_aggressiveness",
+            side_effect=[0.0, 0.0],
+        ), \
+        patch("simulation.choose_optimal_sense", return_value=((+1, -1), 500.0, 400.0)), \
+        patch("simulation.apply_non_compliance_to_cat", side_effect=fake_non_compliance), \
+        patch("simulation.classify_event", side_effect=fake_classify), \
+        patch("simulation.apply_second_phase", side_effect=fake_second_phase):
+        df = run_batch(
+            runs=1,
+            seed=1,
+            scenario="Head-on",
+            jitter_priors=False,
+            p_opp=0.0,
+            p_ta=0.0,
+            p_weak=0.0,
+            opp_sense_model=OppositeSenseModel.from_parameters(
+                manual_baseline=0.0,
+                jitter_enabled=False,
+            ),
+        )
+
+    row = df.iloc[0]
+    history = decode_time_history(row["time_history_json"])
+
+    assert history is not None
+    assert np.allclose(history["times"], expected_times)
+
+    pl_vs0 = float(row["pl_vs0_init"])
+    cat_vs0 = float(row["cat_vs0_init"])
+    assert np.allclose(history["vs_pl"], np.array([pl_vs0, -500.0, -800.0]))
+    assert np.allclose(history["vs_ca"], np.array([cat_vs0, 400.0, 700.0]))
+
+    assert int(row["sensePL_final"]) == -int(row["sensePL"])
+    assert int(row["senseCAT_exec_final"]) == -int(row["senseCAT_exec"])
+    assert int(row["senseCAT_chosen_final"]) == -int(row["senseCAT_chosen"])
+
+
+def test_extend_history_with_pretrigger_adds_negative_window():
+    times = np.array([0.0, 0.5, 1.0])
+    z_pl = np.array([0.0, 10.0, 25.0])
+    z_ca = np.array([300.0, 290.0, 275.0])
+
+    times_ext, z_pl_ext, z_ca_ext = extend_history_with_pretrigger(
+        times,
+        z_pl,
+        z_ca,
+        pl_vs0=600.0,
+        cat_vs0=-300.0,
+        pretrigger_window_s=1.0,
+    )
+
+    assert times_ext[0] == -1.0
+    assert np.allclose(times_ext[-3:], times)
+
+    assert np.isclose(z_pl_ext[0], -10.0)
+    assert np.isclose(z_pl_ext[1], -5.0)
+    assert np.isclose(z_pl_ext[2], z_pl[0])
+
+    assert np.isclose(z_ca_ext[0], 305.0)
+    assert np.isclose(z_ca_ext[1], 302.5)
+    assert np.isclose(z_ca_ext[2], z_ca[0])
