@@ -950,17 +950,81 @@ def test_run_batch_reversal_attempt_without_flip():
         apfd_share=0.25,
     )
 
-    attempts = []
+    lingering = []
+    downgraded = []
     for row in df.itertuples():
         for entry in row.maneuver_sequence:
             if entry["eventtype"] == "REVERSE" and not entry["executed_flip"]:
-                attempts.append((row, entry))
+                lingering.append((row, entry))
+            if not entry["executed_flip"]:
+                downgraded.append((row, entry))
 
-    assert attempts, "expected at least one attempted reversal without execution"
-    for row, entry in attempts:
-        assert row.any_reversal == 0
-        assert row.eventtype_final != "REVERSE"
-        assert not entry["executed_flip"]
+    assert not lingering, "unexecuted reversals should be downgraded"
+    assert downgraded, "expected at least one non-flip manoeuvre for coverage"
+
+    for row, entry in downgraded:
+        if entry["eventtype"] == "STRENGTHEN":
+            assert row.eventtype_final in {"STRENGTHEN", "NONE"}
+        if entry["eventtype"] == "NONE":
+            assert row.eventtype_final == "NONE"
+
+
+def test_run_batch_reversal_downgrade_matches_execution():
+    with patch("simulation.classify_event") as mock_classify, patch(
+        "simulation.apply_second_phase"
+    ) as mock_apply:
+
+        def fake_apply(
+            times,
+            vs_pl,
+            vs_ca,
+            tgo,
+            dt,
+            eventtype,
+            sense_pl,
+            sense_cat_exec,
+            sense_cat_cmd,
+            **kwargs,
+        ):
+            t_issue = max(0.0, tgo - 0.05)
+            start_time = float(times[0]) if len(times) else 0.0
+            times2 = np.array([start_time, t_issue, min(tgo, t_issue + 0.01)])
+            vs_pl_start = float(vs_pl[0]) if len(vs_pl) else 0.0
+            vs_pl2 = np.array([vs_pl_start, vs_pl_start, vs_pl_start])
+            cat_vs0 = float(kwargs.get("cat_vs0", 0.0))
+            sign = 1 if sense_cat_exec >= 0 else -1
+            vs_strength = sign * (abs(cat_vs0) + 3000.0)
+            vs_ca2 = np.array([cat_vs0, cat_vs0, vs_strength])
+            return times2, vs_pl2, vs_ca2, t_issue, sense_pl, sense_cat_exec, sense_cat_cmd
+
+        mock_apply.side_effect = fake_apply
+        mock_classify.side_effect = [
+            ("REVERSE", 100.0, 120.0, 5.0, "Slow response"),
+        ]
+
+        df = run_batch(
+            runs=1,
+            seed=5,
+            scenario="Head-on",
+            jitter_priors=False,
+            use_delay_mixture=False,
+            apfd_share=0.0,
+        )
+
+    row = df.iloc[0]
+    seq = row.maneuver_sequence
+
+    assert mock_classify.call_count == 1
+    assert len(seq) == 1
+
+    entry = seq[0]
+    assert entry["eventtype"] == "STRENGTHEN"
+    assert not entry["executed_flip"]
+
+    assert row.eventtype == "STRENGTHEN"
+    assert row.eventtype_final == "STRENGTHEN"
+    assert row.event_detail is None
+    assert row.event_detail_final is None
 
 
 def test_run_batch_apfd_sense_matches_fast_template():

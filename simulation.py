@@ -1233,6 +1233,7 @@ def run_batch(
         tau_detect_initial: Optional[float] = None
         final_eventtype: Optional[str] = None
         final_event_detail: Optional[str] = None
+        final_event_detail_override = False
         final_t_detect: Optional[float] = None
         final_tau_detect: Optional[float] = None
         t_second_issue: Optional[float] = None
@@ -1289,6 +1290,7 @@ def run_batch(
 
             final_eventtype = str(eventtype)
             final_event_detail = event_detail
+            final_event_detail_override = False
             final_t_detect = float(t_detect)
             final_tau_detect = float(tau_detect)
 
@@ -1354,6 +1356,40 @@ def run_batch(
             executed_flip = bool(cat_exec_flipped or cat_cmd_flipped)
             record["executed_flip"] = executed_flip
 
+            if eventtype == "REVERSE" and not executed_flip:
+                issue_time = t2_issue if t2_issue is not None else t_detect
+                if current_times.size:
+                    issue_time = float(
+                        np.clip(issue_time, float(current_times[0]), float(current_times[-1]))
+                    )
+                vs_ca_at_issue = float(np.interp(issue_time, current_times, current_vs_ca))
+                post_mask = times2 > issue_time + 1e-9
+                vs_ca_post = vs_ca2[post_mask]
+                if vs_ca_post.size:
+                    max_post_mag = float(np.max(np.abs(vs_ca_post)))
+                else:
+                    max_post_mag = abs(vs_ca_at_issue)
+                strengthened = bool(max_post_mag > abs(vs_ca_at_issue) + 1.0)
+                downgraded_type = "STRENGTHEN" if strengthened else "NONE"
+                downgraded_detail = None
+
+                record["eventtype"] = downgraded_type
+                record["event_detail"] = downgraded_detail
+                final_eventtype = downgraded_type
+                final_event_detail = downgraded_detail
+                final_event_detail_override = True
+                final_t_detect = float(t_detect)
+                final_tau_detect = float(tau_detect)
+
+                if phase == 0:
+                    eventtype_initial = downgraded_type
+                    event_detail_initial = downgraded_detail
+                    t_detect_initial = float(t_detect)
+                    tau_detect_initial = float(tau_detect)
+
+                eventtype = downgraded_type
+                event_detail = downgraded_detail
+
             if eventtype == "REVERSE" and executed_flip:
                 reversal_observed = True
                 reversal_detail = event_detail
@@ -1397,7 +1433,7 @@ def run_batch(
             final_tau_detect = reversal_tau_detect
         if event_detail_initial is None:
             event_detail_initial = None
-        if final_event_detail is None:
+        if final_event_detail is None and not final_event_detail_override:
             final_event_detail = event_detail_initial
         if t_detect_initial is None:
             t_detect_initial = float(times[-1]) if times.size else 0.0
