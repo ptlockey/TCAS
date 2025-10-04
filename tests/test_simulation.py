@@ -12,6 +12,7 @@ from simulation import (
     CAT_CAP_STRENGTH_FPM,
     CAT_INIT_VS_FPM,
     CAT_STRENGTH_FPM,
+    apply_non_compliance_to_cat,
     FT_PER_M,
     G,
     PL_ACCEL_G,
@@ -25,6 +26,7 @@ from simulation import (
     integrate_altitude_from_vs,
     ias_to_tas,
     OppositeSenseModel,
+    OppositeSenseBand,
     run_batch,
     vs_time_series,
 )
@@ -1238,6 +1240,62 @@ def test_classify_event_opposite_sense_still_reverses():
     assert detail == "Exigent wrong-sense"
 
 
+def test_apply_non_compliance_apfd_preserves_sense():
+    rng = np.random.default_rng(1234)
+    for commanded_sense in (+1, -1):
+        for _ in range(64):
+            outcome, flown_sense, *_ = apply_non_compliance_to_cat(
+                rng,
+                commanded_sense,
+                base_delay_s=0.9,
+                base_accel_g=0.25,
+                vs_fpm=CAT_INIT_VS_FPM,
+                cap_fpm=CAT_CAP_INIT_FPM,
+                p_taonly=0.05,
+                p_weak=0.10,
+                jitter=True,
+                cat_mode_key="apfd",
+                mode_label_override="AP/FD",
+            )
+            assert flown_sense == commanded_sense, outcome
+
+
+def test_apply_non_compliance_label_override_still_apfd():
+    rng = np.random.default_rng(9876)
+    commanded_sense = +1
+    for _ in range(64):
+        outcome, flown_sense, *_ = apply_non_compliance_to_cat(
+            rng,
+            commanded_sense,
+            base_delay_s=4.5,
+            base_accel_g=0.20,
+            vs_fpm=CAT_INIT_VS_FPM,
+            cap_fpm=CAT_CAP_INIT_FPM,
+            p_taonly=0.05,
+            p_weak=0.10,
+            jitter=False,
+            cat_mode_key="manual",
+            mode_label_override="AP/FD",
+        )
+        assert flown_sense == commanded_sense, outcome
+
+
+def test_opposite_sense_model_apfd_probability_zero():
+    rng = np.random.default_rng(42)
+    model = OppositeSenseModel.from_parameters(
+        manual_baseline=0.3,
+        apfd_baseline=0.9,
+        altitude_bands=[
+            OppositeSenseBand(0.0, 10000.0, 0.4, 0.8),
+            OppositeSenseBand(10000.0, 20000.0, 0.2, 0.6),
+        ],
+        jitter_enabled=True,
+    )
+
+    assert model.probability(rng, mode="apfd", altitude_ft=8000.0, jitter_override=True) == 0.0
+    assert model.probability(rng, mode="AP/FD", altitude_ft=18000.0, jitter_override=False) == 0.0
+
+
 def test_run_batch_manual_opposite_sense_high_rate():
     model = OppositeSenseModel.from_parameters(manual_baseline=0.8, jitter_enabled=False)
     df = run_batch(
@@ -1259,7 +1317,7 @@ def test_run_batch_manual_opposite_sense_high_rate():
     assert 0.7 <= wrong_share <= 0.9
 
 
-def test_run_batch_apfd_opposite_sense_low_rate():
+def test_run_batch_apfd_opposite_sense_zero_rate():
     model = OppositeSenseModel.from_parameters(
         manual_baseline=0.3,
         apfd_baseline=0.05,
@@ -1281,4 +1339,4 @@ def test_run_batch_apfd_opposite_sense_low_rate():
     wrong_share = (
         df.loc[mask, "senseCAT_exec"] == -df.loc[mask, "senseCAT_chosen"]
     ).mean()
-    assert 0.02 <= wrong_share <= 0.08
+    assert np.isclose(wrong_share, 0.0)
