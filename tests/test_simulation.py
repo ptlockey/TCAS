@@ -72,7 +72,7 @@ def test_vs_time_series_post_delay_slope_matches_commanded_accel():
         assert np.allclose(slopes, sense * expected_slope, atol=1e-6)
 
 
-def test_apply_second_phase_reverse_flips_senses_and_profiles():
+def test_apply_second_phase_reverse_keeps_pl_sense_and_flips_cat():
     tgo = 20.0
     dt = 0.5
     sense_pl = +1
@@ -133,7 +133,7 @@ def test_apply_second_phase_reverse_flips_senses_and_profiles():
 
     assert t_issue is not None
 
-    assert new_sense_pl == -sense_pl
+    assert new_sense_pl == sense_pl
     assert new_sense_cat_exec == -sense_cat
     assert new_sense_cat_cmd == -sense_cat
 
@@ -142,9 +142,19 @@ def test_apply_second_phase_reverse_flips_senses_and_profiles():
     assert np.allclose(vs_ca2[prefix_mask], np.interp(times2[prefix_mask], times, vs_ca))
 
     idx_issue = int(np.where(np.isclose(times2, t_issue))[0][0])
-    assert vs_pl2[idx_issue] > 0.0
-    assert np.any(vs_pl2[idx_issue:] < 0.0)
-    assert vs_pl2[-1] < 0.0
+    rem = tgo - times2[idx_issue]
+    _, expected_vs_pl = vs_time_series(
+        rem,
+        dt,
+        PL_DELAY_MEAN_S,
+        PL_ACCEL_G,
+        PL_VS_FPM,
+        sense=sense_pl,
+        cap_fpm=PL_VS_CAP_FPM,
+        vs0_fpm=vs_pl2[idx_issue],
+    )
+
+    assert np.allclose(vs_pl2[idx_issue:], expected_vs_pl)
     assert vs_ca2[-1] > 0.0
 
 
@@ -217,7 +227,7 @@ def test_apply_second_phase_reverse_improves_predicted_miss():
     )
 
     assert t_issue is not None
-    assert new_sense_pl == -sense_pl
+    assert new_sense_pl == sense_pl
     assert new_sense_cat_exec == -sense_cat
     assert new_sense_cat_cmd == -sense_cat
 
@@ -1109,17 +1119,14 @@ def test_manual_reversal_requires_delayed_cpa_improvement():
         t_rem = max(0.0, tgo - t2_issue_est)
 
         cpas = {}
-        for label, next_sense_pl, next_sense_cat in (
-            ("keep", sense_pl, sense_cat),
-            ("flip", -sense_pl, -sense_cat),
-        ):
+        for label, next_sense_cat in (("keep", sense_cat), ("flip", -sense_cat)):
             t_rel, vs_pl_candidate = vs_time_series(
                 t_rem,
                 dt,
                 PL_DELAY_MEAN_S,
                 PL_ACCEL_G,
                 PL_VS_FPM,
-                sense=next_sense_pl,
+                sense=sense_pl,
                 cap_fpm=PL_VS_CAP_FPM,
                 vs0_fpm=vs_pl_now,
             )
@@ -1175,7 +1182,7 @@ def test_manual_reversal_requires_delayed_cpa_improvement():
 
         if expect_flip:
             assert cpas["flip"] > cpas["keep"] + 1e-3
-            assert new_sense_pl == -sense_pl
+            assert new_sense_pl == sense_pl
             assert new_sense_cat_exec == -sense_cat
             assert new_sense_cat_cmd == -sense_cat
         else:
@@ -1427,7 +1434,7 @@ def test_run_batch_records_final_history_and_senses():
     assert np.allclose(history["vs_pl"], np.array([pl_vs0, -500.0, -800.0]))
     assert np.allclose(history["vs_ca"], np.array([cat_vs0, 400.0, 700.0]))
 
-    assert int(row["sensePL_final"]) == -int(row["sensePL"])
+    assert int(row["sensePL_final"]) == int(row["sensePL"])
     assert int(row["senseCAT_exec_final"]) == -int(row["senseCAT_exec"])
     assert int(row["senseCAT_chosen_final"]) == -int(row["senseCAT_chosen"])
 

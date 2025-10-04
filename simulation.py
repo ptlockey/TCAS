@@ -1209,17 +1209,24 @@ def apply_second_phase(
         cat_vs_eff = cat_vs_strength
         cat_cap_eff = cat_cap
 
+    pl_delay_eff = PL_DELAY_MEAN_S
+    pl_accel_eff = PL_ACCEL_G
+    pl_vs_eff = PL_VS_FPM
+    pl_cap_eff = PL_VS_CAP_FPM
+
+    baseline_sense_pl = int(math.copysign(1.0, sense_pl)) if sense_pl != 0 else 1
+
     if eventtype == "REVERSE":
         candidate_configs = [
             {
                 "label": "flip",
-                "sense_pl": -sense_pl,
+                "sense_pl": baseline_sense_pl,
                 "sense_cat_exec": -sense_cat_exec,
                 "sense_cat_cmd": -sense_cat_cmd,
             },
             {
                 "label": "keep",
-                "sense_pl": sense_pl,
+                "sense_pl": baseline_sense_pl,
                 "sense_cat_exec": sense_cat_exec,
                 "sense_cat_cmd": sense_cat_cmd,
             },
@@ -1228,7 +1235,7 @@ def apply_second_phase(
         candidate_configs = [
             {
                 "label": "default",
-                "sense_pl": sense_pl,
+                "sense_pl": baseline_sense_pl,
                 "sense_cat_exec": sense_cat_exec,
                 "sense_cat_cmd": sense_cat_cmd,
             }
@@ -1238,11 +1245,11 @@ def apply_second_phase(
         t_rel, vs_pl_candidate = vs_time_series(
             t_rem,
             dt,
-            pl_delay,
-            pl_accel_g,
-            pl_cap,
+            pl_delay_eff,
+            pl_accel_eff,
+            pl_vs_eff,
             sense=cfg["sense_pl"],
-            cap_fpm=pl_cap,
+            cap_fpm=pl_cap_eff,
             vs0_fpm=vs_pl_now,
         )
         _, vs_ca_candidate = vs_time_series(
@@ -1266,10 +1273,11 @@ def apply_second_phase(
     if eventtype == "REVERSE":
         flip_cfg = next(cfg for cfg in candidate_configs if cfg["label"] == "flip")
         keep_cfg = next(cfg for cfg in candidate_configs if cfg["label"] == "keep")
-        if flip_cfg["cpa_sep"] + 1e-6 < keep_cfg["cpa_sep"]:
-            best_cfg = keep_cfg
-        else:
+        improvement = float(flip_cfg["cpa_sep"] - keep_cfg["cpa_sep"])
+        if improvement > 1e-6:
             best_cfg = flip_cfg
+        else:
+            best_cfg = keep_cfg
     else:
         best_cfg = candidate_configs[0]
 
@@ -1561,7 +1569,8 @@ def run_batch(
         current_vs_ca = vs_ca
         current_z_pl = z_pl
         current_z_ca = z_ca
-        current_sense_pl = sense_pl
+        baseline_sense_pl = int(math.copysign(1.0, sense_pl)) if sense_pl != 0 else 1
+        current_sense_pl = baseline_sense_pl
         current_sense_cat_exec = sense_cat_exec
         current_sense_chosen = sense_ca
 
@@ -1696,6 +1705,9 @@ def run_batch(
             executed_flip = bool(cat_exec_flipped or cat_cmd_flipped)
             record["executed_flip"] = executed_flip
 
+            if new_sense_pl != baseline_sense_pl:
+                new_sense_pl = baseline_sense_pl
+
             if eventtype == "REVERSE" and not executed_flip:
                 issue_time = t2_issue if t2_issue is not None else t_detect
                 if current_times.size:
@@ -1753,7 +1765,7 @@ def run_batch(
                 h0 if cat_above else -h0,
             )
 
-            current_sense_pl = new_sense_pl
+            current_sense_pl = baseline_sense_pl
             current_sense_cat_exec = new_sense_cat_exec
             current_sense_chosen = new_sense_cat_cmd
 
