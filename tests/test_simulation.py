@@ -3,6 +3,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas.testing as pdt
+from unittest.mock import patch
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
@@ -1113,3 +1114,60 @@ def test_manual_reversal_requires_delayed_cpa_improvement():
             assert new_sense_pl == sense_pl
             assert new_sense_cat_exec == sense_cat
             assert new_sense_cat_cmd == sense_cat
+
+
+def test_classify_event_same_sense_needs_cpa_improvement():
+    times = np.array([0.0, 5.0, 10.0])
+    vs_pl = np.array([0.0, 200.0, 200.0])
+    vs_ca = np.array([0.0, 150.0, 150.0])
+    z_pl = np.array([0.0, 200.0 / 60.0 * 5.0, 200.0 / 60.0 * 10.0])
+    sep_mid = 40.0
+    z_ca = np.array(
+        [
+            sep_mid + z_pl[1],
+            sep_mid,
+            sep_mid - (vs_pl[1] - vs_ca[1]) / 60.0 * 5.0,
+        ]
+    )
+
+    with patch("simulation.STRENGTHEN_PAD_FT", -500.0):
+        eventtype, *_ , detail = classify_event(
+            times,
+            z_pl,
+            z_ca,
+            vs_pl,
+            vs_ca,
+            tgo=10.0,
+            alim_ft=60.0,
+            margin_ft=0.0,
+            sense_chosen_cat=+1,
+            sense_exec_cat=+1,
+            projection_cat_delay_s=50.0,
+        )
+
+    assert eventtype == "NONE"
+    assert detail is None
+
+
+def test_classify_event_opposite_sense_still_reverses():
+    times = np.array([0.0, 5.0, 10.0])
+    vs_pl = np.array([0.0, 200.0, 200.0])
+    vs_ca = np.array([0.0, -200.0, -200.0])
+    z_pl = np.array([0.0, 200.0 / 60.0 * 5.0, 200.0 / 60.0 * 10.0])
+    z_ca = np.array([300.0, 200.0, 100.0])
+
+    eventtype, *_ , detail = classify_event(
+        times,
+        z_pl,
+        z_ca,
+        vs_pl,
+        vs_ca,
+        tgo=10.0,
+        alim_ft=60.0,
+        margin_ft=0.0,
+        sense_chosen_cat=+1,
+        sense_exec_cat=+1,
+    )
+
+    assert eventtype == "REVERSE"
+    assert detail == "Exigent wrong-sense"
