@@ -12,6 +12,8 @@ import math
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
+import json
+
 import numpy as np
 import pandas as pd
 
@@ -153,6 +155,126 @@ def integrate_altitude_from_vs(
     z = z0_ft + np.cumsum((vs_fpm / 60.0) * dt)
     z[0] = z0_ft
     return z
+
+
+def encode_time_history(
+    times: np.ndarray,
+    vs_pl: np.ndarray,
+    vs_ca: np.ndarray,
+    z_pl: np.ndarray,
+    z_ca: np.ndarray,
+) -> str:
+    """Serialise trajectory histories for storage in batch outputs."""
+
+    payload = {
+        "times": [float(x) for x in np.asarray(times, dtype=float)],
+        "vs_pl": [float(x) for x in np.asarray(vs_pl, dtype=float)],
+        "vs_ca": [float(x) for x in np.asarray(vs_ca, dtype=float)],
+        "z_pl": [float(x) for x in np.asarray(z_pl, dtype=float)],
+        "z_ca": [float(x) for x in np.asarray(z_ca, dtype=float)],
+    }
+    return json.dumps(payload, separators=(",", ":"))
+
+
+def decode_time_history(value: object) -> Optional[Dict[str, np.ndarray]]:
+    """Decode trajectory histories stored by :func:`encode_time_history`."""
+
+    if value is None:
+        return None
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            value = value.decode("utf-8")
+        except Exception:  # noqa: BLE001
+            return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+    elif isinstance(value, dict):
+        payload = value
+    else:
+        return None
+
+    try:
+        times = np.asarray(payload["times"], dtype=float)
+        vs_pl = np.asarray(payload["vs_pl"], dtype=float)
+        vs_ca = np.asarray(payload["vs_ca"], dtype=float)
+    except (KeyError, TypeError, ValueError):
+        return None
+
+    result: Dict[str, np.ndarray] = {
+        "times": times,
+        "vs_pl": vs_pl,
+        "vs_ca": vs_ca,
+    }
+
+    for key in ("z_pl", "z_ca"):
+        try:
+            values = payload.get(key)
+        except AttributeError:
+            values = None
+        if values is None:
+            continue
+        try:
+            arr = np.asarray(values, dtype=float)
+        except (TypeError, ValueError):
+            continue
+        if arr.shape == times.shape:
+            result[key] = arr
+
+    return result
+
+
+def extend_history_with_pretrigger(
+    times: np.ndarray,
+    z_pl: np.ndarray,
+    z_ca: np.ndarray,
+    pl_vs0: float,
+    cat_vs0: float,
+    pretrigger_window_s: float = 2.0,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Prepend a negative-time window showing motion prior to the RA trigger."""
+
+    times = np.asarray(times, dtype=float)
+    z_pl = np.asarray(z_pl, dtype=float)
+    z_ca = np.asarray(z_ca, dtype=float)
+
+    if times.size == 0 or z_pl.shape != times.shape or z_ca.shape != times.shape:
+        return times, z_pl, z_ca
+
+    if times.size >= 2:
+        dt = float(np.min(np.diff(times)))
+        if dt <= 1e-9:
+            dt = float(np.max(np.diff(times))) if times.size >= 2 else 0.0
+    else:
+        dt = 0.0
+
+    pre_window = float(max(0.0, pretrigger_window_s))
+    if pre_window <= 1e-9 or dt <= 1e-9:
+        return times, z_pl, z_ca
+
+    steps = int(max(1, math.ceil(pre_window / dt)))
+    pre_times = -dt * np.arange(steps, 0, -1, dtype=float)
+
+    pl_rate = float(pl_vs0) / 60.0
+    cat_rate = float(cat_vs0) / 60.0
+    z_pl0 = float(z_pl[0])
+    z_ca0 = float(z_ca[0])
+
+    z_pl_pre = z_pl0 + pre_times * pl_rate
+    z_ca_pre = z_ca0 + pre_times * cat_rate
+
+    times_ext = np.concatenate([pre_times, times])
+    z_pl_ext = np.concatenate([z_pl_pre, z_pl])
+    z_ca_ext = np.concatenate([z_ca_pre, z_ca])
+
+    return times_ext, z_pl_ext, z_ca_ext
 
 
 def relative_closure_kt(v1_kt: float, hdg1_deg: float, v2_kt: float, hdg2_deg: float) -> float:
@@ -1694,6 +1816,8 @@ def run_batch(
             times=times,
         )
 
+        history_json = encode_time_history(times, vs_pl, vs_ca, z_pl, z_ca)
+
         data.append(
             dict(
                 run=k + 1,
@@ -1715,6 +1839,9 @@ def run_batch(
                 senseCAT_chosen=sense_ca,
                 CAT_mode=mode,
                 senseCAT_exec=sense_cat_exec,
+                sensePL_final=int(current_sense_pl),
+                senseCAT_exec_final=int(current_sense_cat_exec),
+                senseCAT_chosen_final=int(current_sense_chosen),
                 pl_vs0_init=vz0_pl,
                 cat_vs0_init=vz0_cat,
                 plDelay=pl_delay,
@@ -1750,6 +1877,7 @@ def run_batch(
                 residual_risk=residual_risk,
                 delta_h_pl_ft=delta_pl,
                 delta_h_cat_ft=delta_cat,
+                time_history_json=history_json,
             )
         )
 
@@ -1789,6 +1917,9 @@ __all__ = [
     "ias_to_tas",
     "vs_time_series",
     "integrate_altitude_from_vs",
+    "encode_time_history",
+    "decode_time_history",
+    "extend_history_with_pretrigger",
     "relative_closure_kt",
     "time_to_go_from_geometry",
     "sample_headings",

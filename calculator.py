@@ -41,6 +41,8 @@ from simulation import (
     run_batch,
     sanitize_tgo_bounds,
     time_to_go_from_geometry,
+    decode_time_history,
+    extend_history_with_pretrigger,
     vs_time_series,
 )
 
@@ -358,6 +360,14 @@ with tabs[0]:
             z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
             z_cat = integrate_altitude_from_vs(times_cat, vs_cat, 0.0)
 
+            times_plot, z_pl_plot, z_cat_plot = extend_history_with_pretrigger(
+                times,
+                z_pl,
+                z_cat,
+                pl_vs0=float(vs_pl[0] if len(vs_pl) else 0.0),
+                cat_vs0=float(vs_cat[0] if len(vs_cat) else 0.0),
+            )
+
             # ensure equal length for plotting when CAT is level
             if len(times_cat) != len(times):
                 vs_cat = np.zeros_like(times)
@@ -382,9 +392,9 @@ with tabs[0]:
             st.caption("These metrics describe the immediate geometry of the hand-crafted encounter.")
 
             fig, ax = plt.subplots(figsize=(8, 4))
-            ax.plot(times, z_pl, label="PL (climb)")
+            ax.plot(times_plot, z_pl_plot, label="PL (climb)")
             label_cat = "CAT (level)" if sense_cat == 0 else f"CAT ({'climb' if sense_cat>0 else 'descend'})"
-            ax.plot(times, z_cat, label=label_cat)
+            ax.plot(times_plot, z_cat_plot, label=label_cat)
             ax.axhline(0.0, ls='--', lw=1, alpha=0.6)
             ax.set_xlabel("Time since RA trigger (s)")
             ax.set_ylabel("Altitude change (ft)")
@@ -612,31 +622,103 @@ with tabs[1]:
             )
             row = df[df['run'] == rid].iloc[0]
 
-            # Rebuild kinematics from stored fields (display only; uses assumed initial VS = 0)
+            # Reconstruct manoeuvre histories using stored data when available.
             tgo = float(row["tgos"])
             h0 = float(row["h0ft"])
             FL_pl = int(row["FL_PL"])
             FL_cat = int(row["FL_CAT"])
-            cat_above = (FL_cat > FL_pl) if (FL_cat != FL_pl) else True
-            sense_pl = int(row["sensePL"])
-            sense_cat = int(row["senseCAT_exec"])
-            cat_td = float(row["catDelay"])
-            cat_ag = float(row["catAccel_g"])
-            cat_vs = float(row["catVS_cmd"])
-            cat_cap = float(row["catCap_cmd"])
-            pl_delay = float(row["plDelay"])
+            if "cat_above" in row.index and not pd.isna(row["cat_above"]):
+                cat_above = bool(row["cat_above"])
+            else:
+                cat_above = (FL_cat > FL_pl) if (FL_cat != FL_pl) else True
             alim_ft = float(row['ALIM_ft'])
 
-            times, vs_pl = vs_time_series(tgo, 0.1, pl_delay, PL_ACCEL_G, PL_VS_FPM, sense=sense_pl, cap_fpm=PL_VS_CAP_FPM, vs0_fpm=0.0)
-            _, vs_ca = vs_time_series(tgo, 0.1, cat_td, cat_ag, cat_vs, sense=sense_cat, cap_fpm=cat_cap, vs0_fpm=0.0)
-            z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
-            z_ca = integrate_altitude_from_vs(times, vs_ca, h0 if cat_above else -h0)
-            miss_cpa = float(abs(z_ca[-1] - z_pl[-1]))
+            sense_pl_final = int(row["sensePL_final"]) if "sensePL_final" in row.index else int(row["sensePL"])
+            sense_cat_final = int(row["senseCAT_exec_final"]) if "senseCAT_exec_final" in row.index else int(row["senseCAT_exec"])
+
+            pl_vs0_init = float(row.get("pl_vs0_init", 0.0))
+            cat_vs0_init = float(row.get("cat_vs0_init", 0.0))
+
+            history_data = None
+            if "time_history_json" in row.index:
+                history_data = decode_time_history(row["time_history_json"])
+
+            if history_data is not None:
+                times = history_data["times"]
+                vs_pl = history_data["vs_pl"]
+                vs_ca = history_data["vs_ca"]
+                z_pl = history_data.get("z_pl")
+                z_ca = history_data.get("z_ca")
+                if z_pl is None or z_ca is None:
+                    z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
+                    z_ca = integrate_altitude_from_vs(
+                        times,
+                        vs_ca,
+                        h0 if cat_above else -h0,
+                    )
+            else:
+                sense_pl = int(row["sensePL"])
+                sense_cat_exec = int(row["senseCAT_exec"])
+                cat_td = float(row["catDelay"])
+                cat_ag = float(row["catAccel_g"])
+                cat_vs = float(row["catVS_cmd"])
+                cat_cap = float(row["catCap_cmd"])
+                pl_delay = float(row["plDelay"])
+
+                times, vs_pl = vs_time_series(
+                    tgo,
+                    0.1,
+                    pl_delay,
+                    PL_ACCEL_G,
+                    PL_VS_FPM,
+                    sense=sense_pl,
+                    cap_fpm=PL_VS_CAP_FPM,
+                    vs0_fpm=pl_vs0_init,
+                )
+                _, vs_ca = vs_time_series(
+                    tgo,
+                    0.1,
+                    cat_td,
+                    cat_ag,
+                    cat_vs,
+                    sense=sense_cat_exec,
+                    cap_fpm=cat_cap,
+                    vs0_fpm=cat_vs0_init,
+                )
+                z_pl = integrate_altitude_from_vs(times, vs_pl, 0.0)
+                z_ca = integrate_altitude_from_vs(
+                    times,
+                    vs_ca,
+                    h0 if cat_above else -h0,
+                )
+
+            miss_cpa = float(abs(z_ca[-1] - z_pl[-1])) if len(z_pl) else float("nan")
+
+            times_plot, z_pl_plot, z_ca_plot = extend_history_with_pretrigger(
+                times,
+                z_pl,
+                z_ca,
+                pl_vs0=pl_vs0_init,
+                cat_vs0=cat_vs0_init,
+            )
+
+            pl_label = "level" if sense_pl_final == 0 else ("climb" if sense_pl_final > 0 else "descend")
+            cat_label = "level" if sense_cat_final == 0 else ("climb" if sense_cat_final > 0 else "descend")
 
             fig_run, ax_run = plt.subplots(figsize=(8,4))
-            ax_run.plot(times, z_pl, label=f"PL ({'climb' if sense_pl>0 else 'descend'})")
-            ax_run.plot(times, z_ca, label=f"CAT ({'climb' if sense_cat>0 else 'descend'}) [{row['CAT_mode']}]")
-            ax_run.fill_between(times, z_pl - alim_ft, z_pl + alim_ft, alpha=0.08, label=f"±ALIM at FL{FL_pl}")
+            ax_run.plot(times_plot, z_pl_plot, label=f"PL ({pl_label})")
+            ax_run.plot(
+                times_plot,
+                z_ca_plot,
+                label=f"CAT ({cat_label}) [{row['CAT_mode']}]",
+            )
+            ax_run.fill_between(
+                times_plot,
+                z_pl_plot - alim_ft,
+                z_pl_plot + alim_ft,
+                alpha=0.08,
+                label=f"±ALIM at FL{FL_pl}",
+            )
             ax_run.axhline(0, ls='--', lw=1, alpha=0.6)
             if not pd.isna(row['t_second_issue']):
                 ax_run.axvline(float(row['t_second_issue']), ls=':', lw=1, alpha=0.7, label='2nd‑phase issue')
