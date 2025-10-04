@@ -38,9 +38,9 @@ from simulation import (
     ias_to_tas,
     integrate_altitude_from_vs,
     OppositeSenseBand,
+    derive_single_run_geometry,
     run_batch,
     sanitize_tgo_bounds,
-    time_to_go_from_geometry,
     decode_time_history,
     extend_history_with_pretrigger,
     vs_time_series,
@@ -129,7 +129,7 @@ with st.sidebar:
             )
             tgo_window = sanitize_tgo_bounds(tgo_minmax[0], tgo_minmax[1])
             st.caption(
-                "When enabled the single-run demo and batch sampler use the selected t_go window instead of the range inputs."
+                "When enabled the single-run demo uses the longest selected t_go as its CPA horizon and the batch sampler draws within that window."
             )
         else:
             tgo_minmax = (None, None)
@@ -327,12 +327,12 @@ with tabs[0]:
         cat_tas = ias_to_tas(float(cat_ias_user), single_alt_ft)
         closure_kt = pl_tas + cat_tas
 
-        initial_range_effective = float(initial_range_nm)
-        if use_custom_tgo and tgo_window is not None and closure_kt > 1e-6:
-            t_cpa = float(np.clip(tgo_window[2], tgo_window[0], tgo_window[1]))
-            initial_range_effective = (closure_kt * t_cpa) / 3600.0
-        else:
-            t_cpa = time_to_go_from_geometry(initial_range_effective, closure_kt)
+        t_cpa, initial_range_effective = derive_single_run_geometry(
+            float(initial_range_nm),
+            closure_kt,
+            bool(use_custom_tgo),
+            tgo_window,
+        )
 
         if t_cpa is None:
             st.warning("Closure rate is zero or negative; CPA cannot be determined.")

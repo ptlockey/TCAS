@@ -27,6 +27,8 @@ from simulation import (
     ias_to_tas,
     OppositeSenseModel,
     OppositeSenseBand,
+    derive_single_run_geometry,
+    sanitize_tgo_bounds,
     decode_time_history,
     extend_history_with_pretrigger,
     run_batch,
@@ -70,6 +72,17 @@ def test_vs_time_series_post_delay_slope_matches_commanded_accel():
 
         slopes = np.diff(post_vs) / np.diff(post_times)
         assert np.allclose(slopes, sense * expected_slope, atol=1e-6)
+
+
+def test_derive_single_run_geometry_uses_window_max_for_cpa():
+    window = sanitize_tgo_bounds(18.0, 30.0)
+    closure_kt = 420.0
+    initial_range_nm = 6.0
+
+    t_cpa, r_eff = derive_single_run_geometry(initial_range_nm, closure_kt, True, window)
+
+    assert np.isclose(t_cpa, window[1])
+    assert np.isclose(r_eff, (closure_kt * window[1]) / 3600.0)
 
 
 def test_apply_second_phase_reverse_keeps_pl_sense_and_flips_cat():
