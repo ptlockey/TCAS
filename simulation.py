@@ -1281,14 +1281,9 @@ def run_batch(
                 event_detail=event_detail,
                 t_issue=float(t_detect),
                 tau_issue=float(tau_detect),
+                executed_flip=False,
             )
             maneuver_sequence.append(record)
-
-            if eventtype == "REVERSE":
-                reversal_observed = True
-                reversal_detail = event_detail
-                reversal_t_detect = float(t_detect)
-                reversal_tau_detect = float(tau_detect)
 
             if eventtype not in ("STRENGTHEN", "REVERSE"):
                 break
@@ -1298,6 +1293,9 @@ def run_batch(
             t2_issue_est = float(max(0.0, min(tgo, t_detect + latency)))
             z_pl_t2 = float(np.interp(t2_issue_est, current_times, current_z_pl))
             z_cat_t2 = float(np.interp(t2_issue_est, current_times, current_z_ca))
+
+            prior_sense_cat_exec = current_sense_cat_exec
+            prior_sense_cat_cmd = current_sense_chosen
 
             (
                 times2,
@@ -1333,6 +1331,17 @@ def run_batch(
                 cat_mode=mode,
                 force_exigent=force_exigent,
             )
+
+            cat_exec_flipped = new_sense_cat_exec != prior_sense_cat_exec
+            cat_cmd_flipped = new_sense_cat_cmd != prior_sense_cat_cmd
+            executed_flip = bool(cat_exec_flipped or cat_cmd_flipped)
+            record["executed_flip"] = executed_flip
+
+            if eventtype == "REVERSE" and executed_flip:
+                reversal_observed = True
+                reversal_detail = event_detail
+                reversal_t_detect = float(t_detect)
+                reversal_tau_detect = float(tau_detect)
 
             if t2_issue is None:
                 break
