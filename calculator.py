@@ -47,6 +47,7 @@ from simulation import (
     integrate_altitude_from_vs,
     OppositeSenseBand,
     derive_single_run_geometry,
+    compute_residual_risk,
     run_batch,
     sanitize_tgo_bounds,
     decode_time_history,
@@ -408,7 +409,7 @@ with tabs[0]:
             miss_cpa = abs(delta_h_cpa)
             delta_pl = float(z_pl[-1] - z_pl[0])
             delta_cat = float(z_cat[-1] - z_cat[0])
-            residual_risk = abs(delta_cat) / max(abs(delta_pl), 1e-3) * 0.011
+            residual_risk = compute_residual_risk(delta_pl, delta_cat)
 
             st.markdown(
                 f"**Scenario**: Head-on at FL{SINGLE_FL}, PL IAS {PL_IAS_KT:.0f} kt (TAS {pl_tas:.1f} kt), "

@@ -27,6 +27,7 @@ from simulation import (
     classify_event,
     integrate_altitude_from_vs,
     ias_to_tas,
+    compute_residual_risk,
     OppositeSenseModel,
     OppositeSenseBand,
     derive_single_run_geometry,
@@ -1528,3 +1529,21 @@ def test_extend_history_with_pretrigger_adds_negative_window():
     assert np.isclose(z_ca_ext[0], 305.0)
     assert np.isclose(z_ca_ext[1], 302.5)
     assert np.isclose(z_ca_ext[2], z_ca[0])
+
+
+def test_compute_residual_risk_nominal_encounter():
+    delta_pl = 1000.0  # PL climbs 1000 ft
+    delta_cat = 3000.0  # CAT climbs 3000 ft
+
+    residual = compute_residual_risk(delta_pl, delta_cat)
+
+    assert np.isclose(residual, 0.033, atol=1e-6)
+
+
+def test_run_batch_residual_risk_preserves_sign():
+    df = run_batch(runs=1, seed=1234)
+    row = df.iloc[0]
+    expected = compute_residual_risk(row["delta_h_pl_ft"], row["delta_h_cat_ft"])
+
+    assert np.sign(expected) == np.sign(row["residual_risk"])
+    assert np.isclose(row["residual_risk"], expected, atol=1e-9)
