@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ACAS/TCAS v7.1-aligned Monte Carlo — Streamlit app
+TCAS Encounter Analyser — Streamlit app
 Implements the requested amendments on top of your functioning codebase:
  A) Two‑phase RA execution (STRENGTHEN ≈ ±2500 fpm or REVERSE) with ~1 s decision latency
  B) Altitude‑dependent ALIM (≈300–700 ft bands)
@@ -110,8 +110,8 @@ def clamp_to_available_run(value: int, run_options: list[int]) -> int:
 
 # ------------------------------- Streamlit UI -------------------------------
 
-st.set_page_config(page_title="ACAS/TCAS v7.1 Monte Carlo", layout="wide")
-st.title("ACAS/TCAS v7.1‑aligned Monte Carlo")
+st.set_page_config(page_title="TCAS Encounter Analyser", layout="wide")
+st.title("TCAS Encounter Analyser")
 
 with st.sidebar:
     st.header("Simulation Controls")
@@ -407,9 +407,9 @@ with tabs[0]:
 
             delta_h_cpa = float(z_pl[-1] - z_cat[-1])
             miss_cpa = abs(delta_h_cpa)
-            delta_pl = float(z_pl[-1] - z_pl[0])
-            delta_cat = float(z_cat[-1] - z_cat[0])
-            residual_risk = compute_residual_risk(delta_pl, delta_cat)
+            delta_h_pl = float(z_pl[-1] - z_pl[0])
+            delta_h_cat = float(z_cat[-1] - z_cat[0])
+            residual_risk = compute_residual_risk(delta_h_pl, delta_h_cat)
 
             st.markdown(
                 f"**Scenario**: Head-on at FL{SINGLE_FL}, PL IAS {PL_IAS_KT:.0f} kt (TAS {pl_tas:.1f} kt), "
@@ -474,21 +474,19 @@ with tabs[1]:
         st.caption(f"ALIM applied: {alim_selection_label} (±{selected_alim_ft:.0f} ft).")
         total_runs = len(df)
         safe_total = max(total_runs, 1)
-        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        c1, c2, c3, c4, c5 = st.columns(5)
         p_rev = (df['eventtype'] == "REVERSE").sum() / safe_total
         p_str = (df['eventtype'] == "STRENGTHEN").sum() / safe_total
         p_none = (df['eventtype'] == "NONE").sum() / safe_total
-        p_alim_any = (df['margin_min_ft'] < 0.0).sum() / safe_total
         sep_reference = df['sep_cpa_ft']
         p_alim_cpa = df['alim_breach_cpa'].sum() / safe_total
         c1.metric("P(Reversal)", f"{100 * p_rev:,.2f}%")
         c2.metric("P(Strengthen)", f"{100 * p_str:,.2f}%")
         c3.metric("P(None)", f"{100 * p_none:,.2f}%")
-        c4.metric("P(ALIM Any)", f"{100 * p_alim_any:,.2f}%")
         mean_cpa_sep = float(sep_reference.mean()) if total_runs else 0.0
         apfd_exec_share = float(df['CAT_is_APFD'].mean()) if total_runs else 0.0
-        c5.metric("P(ALIM @ CPA)", f"{100 * p_alim_cpa:,.2f}%")
-        c6.metric("AP/FD executions", f"{100 * apfd_exec_share:,.2f}%")
+        c4.metric("P(ALIM @ CPA)", f"{100 * p_alim_cpa:,.2f}%")
+        c5.metric("AP/FD executions", f"{100 * apfd_exec_share:,.2f}%")
         st.caption(
             "Percentages describe RA outcomes alongside CPA ALIM breaches without exclusions."
             f" Mean miss @ CPA across the batch: {mean_cpa_sep:,.1f} ft."

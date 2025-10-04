@@ -195,10 +195,13 @@ def encode_time_history(
 
 
 def compute_residual_risk(delta_pl: float, delta_cat: float) -> float:
-    """Return the residual risk ratio using a signed, epsilon-guarded PL delta."""
+    """Return the residual risk ratio derived from RA-to-CPA height changes."""
 
+    delta_pl = float(delta_pl)
+    delta_cat = float(delta_cat)
     guard = delta_pl if abs(delta_pl) >= 1e-3 else math.copysign(1e-3, delta_pl or 1.0)
-    return delta_cat / guard * 0.011
+    ratio = delta_cat / guard
+    return ratio * 0.011
 
 
 def decode_time_history(value: object) -> Optional[Dict[str, np.ndarray]]:
@@ -1928,9 +1931,9 @@ def run_batch(
         alim_breach_band50 = bool(sep_trace[-1] <= band50_threshold)
         alim_breach_band100 = bool(sep_trace[-1] <= band100_threshold)
 
-        delta_pl = float(z_pl[-1] - z_pl[0])
-        delta_cat = float(z_ca[-1] - z_ca[0])
-        residual_risk = compute_residual_risk(delta_pl, delta_cat)
+        delta_h_pl = float(z_pl[-1] - z_pl[0])
+        delta_h_cat = float(z_ca[-1] - z_ca[0])
+        residual_risk = compute_residual_risk(delta_h_pl, delta_h_cat)
 
         comp_label = compliance_score_method_b_like(
             sense_required=sense_cat_exec,
@@ -1997,8 +2000,8 @@ def run_batch(
                 comp_label=comp_label,
                 CAT_is_APFD=int(cat_is_apfd),
                 residual_risk=residual_risk,
-                delta_h_pl_ft=delta_pl,
-                delta_h_cat_ft=delta_cat,
+                delta_h_pl_ft=delta_h_pl,
+                delta_h_cat_ft=delta_h_cat,
                 time_history_json=history_json,
             )
         )
