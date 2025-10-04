@@ -176,6 +176,13 @@ def encode_time_history(
     return json.dumps(payload, separators=(",", ":"))
 
 
+def compute_residual_risk(delta_pl: float, delta_cat: float) -> float:
+    """Return the residual risk ratio using a signed, epsilon-guarded PL delta."""
+
+    guard = delta_pl if abs(delta_pl) >= 1e-3 else math.copysign(1e-3, delta_pl or 1.0)
+    return delta_cat / guard * 0.011
+
+
 def decode_time_history(value: object) -> Optional[Dict[str, np.ndarray]]:
     """Decode trajectory histories stored by :func:`encode_time_history`."""
 
@@ -1839,8 +1846,7 @@ def run_batch(
 
         delta_pl = float(z_pl[-1] - z_pl[0])
         delta_cat = float(z_ca[-1] - z_ca[0])
-        denom = max(abs(delta_pl), 1e-3)
-        residual_risk = abs(delta_cat) / denom * 0.011
+        residual_risk = compute_residual_risk(delta_pl, delta_cat)
 
         comp_label = compliance_score_method_b_like(
             sense_required=sense_cat_exec,
@@ -1947,6 +1953,7 @@ __all__ = [
     "MAX_MANEUVER_PHASES",
     # helpers
     "ias_to_tas",
+    "compute_residual_risk",
     "vs_time_series",
     "integrate_altitude_from_vs",
     "encode_time_history",
