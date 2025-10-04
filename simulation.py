@@ -1333,7 +1333,7 @@ def sample_altitudes_and_h0(
 
 
 def run_batch(
-    runs: int = 5000,
+    runs: int = 1000,
     seed: int = 26,
     scenario: str = "Head-on",
     r0_min_nm: float = 4.0,

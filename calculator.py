@@ -115,7 +115,7 @@ with st.sidebar:
         )
         use_custom_tgo = st.checkbox(
             "Custom time-to-CPA window",
-            value=False,
+            value=True,
             help="Enable to select bespoke minimum/maximum RA look-ahead times (bounded to 15–35 s)."
         )
         if use_custom_tgo:
@@ -123,7 +123,7 @@ with st.sidebar:
                 "Time to CPA range (s)",
                 min_value=15.0,
                 max_value=35.0,
-                value=(22.0, 28.0),
+                value=(15.0, 35.0),
                 step=0.5,
                 help="Minimum and maximum t_go bounds used when sampling encounters. The implied mean is clamped to 24–26 s."
             )
@@ -154,7 +154,7 @@ with st.sidebar:
             "Initial-trajectory aggressiveness",
             0.0,
             1.0,
-            0.30,
+            0.0,
             0.05,
             help="0 = level-off context; 1 = aggressive climb/descend mix."
         )
@@ -282,7 +282,7 @@ with st.sidebar:
 
     with st.expander("ALIM Settings", expanded=True):
         alim_labels = [label for label, _ in ALIM_CHOICES]
-        alim_index_default = 1  # Default to FL100–FL200 band (400 ft)
+        alim_index_default = 2  # Default to FL200–FL420 band (600 ft)
         alim_selection_label = st.radio(
             "User-selected ALIM band",
             options=alim_labels,
@@ -405,8 +405,14 @@ with tabs[0]:
             st.caption("Altitude traces show how the protected aircraft and intruder diverge after the RA.")
 
 with tabs[1]:
-    n_runs = st.number_input("Number of runs", min_value=10, max_value=200000, value=5000, step=500,
-                             help="Monte Carlo sample size; larger values reduce noise at higher compute cost.")
+    n_runs = st.number_input(
+        "Number of runs",
+        min_value=10,
+        max_value=200000,
+        value=1000,
+        step=500,
+        help="Monte Carlo sample size; baseline is 1,000 runs—larger values reduce noise at higher compute cost.",
+    )
 
     if st.button("Run batch"):
         df = run_batch(
