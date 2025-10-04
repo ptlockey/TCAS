@@ -43,6 +43,10 @@ CAT_MANUAL_ACCEL_NOM_G = 0.33
 CAT_APFD_DELAY_NOM_S = 0.9
 CAT_APFD_ACCEL_NOM_G = 0.25
 
+# Reversal projection characteristics (manual vs AP/FD)
+CAT_MANUAL_PROJECTION_DELAY_S = 2.5
+CAT_APFD_PROJECTION_DELAY_S = CAT_APFD_DELAY_NOM_S
+
 # RA timing window
 TGO_MIN_S = 15.0
 TGO_MAX_S = 35.0
@@ -1079,14 +1083,20 @@ def classify_event(
                     CAT_CAP_INIT_FPM,
                 )
             )
-            accel_proj = 0.25 if manual_case else 0.35
+            accel_proj = (
+                CAT_MANUAL_ACCEL_NOM_G if manual_case else CAT_APFD_ACCEL_NOM_G
+            )
 
             latency_proj = 1.0 if projection_decision_latency_s is None else float(
                 projection_decision_latency_s
             )
             latency_proj = float(np.clip(latency_proj, 0.6, 1.4))
             if projection_cat_delay_s is None:
-                cat_delay_proj = 2.5 if manual_case else 0.9
+                cat_delay_proj = (
+                    CAT_MANUAL_PROJECTION_DELAY_S
+                    if manual_case
+                    else CAT_APFD_PROJECTION_DELAY_S
+                )
             else:
                 cat_delay_proj = float(max(0.0, projection_cat_delay_s))
             response_effective_s = latency_proj + cat_delay_proj
