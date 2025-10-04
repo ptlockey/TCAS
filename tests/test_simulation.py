@@ -890,6 +890,7 @@ def test_run_batch_records_maneuver_sequence():
         assert row["eventtype"] == first["eventtype"]
         assert np.isclose(row["t_detect"], first["t_issue"])
         assert np.isclose(row["tau_detect"], first["tau_issue"])
+        assert "executed_flip" in first
         reversals = [entry for entry in seq if entry["eventtype"] == "REVERSE"]
         if row["any_reversal"]:
             assert reversals, "any_reversal flagged but no reversal recorded"
@@ -897,10 +898,13 @@ def test_run_batch_records_maneuver_sequence():
             assert row["eventtype_final"] == "REVERSE"
             assert np.isclose(row["t_detect_final"], rev_last["t_issue"])
             assert np.isclose(row["tau_detect_final"], rev_last["tau_issue"])
+            assert rev_last["executed_flip"]
         else:
             assert row["eventtype_final"] == last["eventtype"]
             assert np.isclose(row["t_detect_final"], last["t_issue"])
             assert np.isclose(row["tau_detect_final"], last["tau_issue"])
+            for entry in reversals:
+                assert not entry["executed_flip"]
 
         second_issue = row["t_second_issue"]
         if second_issue is not None and not np.isnan(second_issue):
@@ -926,6 +930,29 @@ def test_run_batch_same_sense_reversal_rate_with_hold():
 
     slow_rate = same_sense_slow.mean()
     assert slow_rate < 0.05
+
+
+def test_run_batch_reversal_attempt_without_flip():
+    df = run_batch(
+        runs=10,
+        seed=10,
+        scenario="Head-on",
+        jitter_priors=True,
+        use_delay_mixture=True,
+        apfd_share=0.25,
+    )
+
+    attempts = []
+    for row in df.itertuples():
+        for entry in row.maneuver_sequence:
+            if entry["eventtype"] == "REVERSE" and not entry["executed_flip"]:
+                attempts.append((row, entry))
+
+    assert attempts, "expected at least one attempted reversal without execution"
+    for row, entry in attempts:
+        assert row.any_reversal == 0
+        assert row.eventtype_final != "REVERSE"
+        assert not entry["executed_flip"]
 
 
 def test_run_batch_apfd_sense_matches_fast_template():
