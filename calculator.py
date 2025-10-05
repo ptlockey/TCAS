@@ -240,19 +240,35 @@ with st.sidebar:
         )
         st.caption("AP/FD crews are modelled as always flying the commanded sense (P(opposite-sense) = 0).")
         p_opp_apfd = 0.0
-        p_ta = st.number_input(
-            "P(no-response / TA-only)",
+        st.markdown("**Manual crew priors**")
+        p_ta_manual = st.number_input(
+            "Manual P(no-response / TA-only)",
             value=0.075,
             step=0.001,
             format="%.3f",
-            help="Probability of no vertical response beyond traffic advisory behaviour.",
+            help="Probability of no vertical response beyond traffic advisory behaviour for manual crews.",
         )
-        p_weak = st.number_input(
-            "P(weak-compliance)",
+        p_weak_manual = st.number_input(
+            "Manual P(weak-compliance)",
             value=0.425,
             step=0.005,
             format="%.3f",
-            help="Probability that the intruder responds in the commanded sense but with insufficient vertical speed.",
+            help="Probability that a manual intruder responds in the commanded sense but with insufficient vertical speed.",
+        )
+        st.markdown("**AP/FD crew priors**")
+        p_ta_apfd = st.number_input(
+            "AP/FD P(no-response / TA-only)",
+            value=0.010,
+            step=0.001,
+            format="%.3f",
+            help="Probability of no vertical response for automated crews. Defaults are much lower than manual rates.",
+        )
+        p_weak_apfd = st.number_input(
+            "AP/FD P(weak-compliance)",
+            value=0.120,
+            step=0.005,
+            format="%.3f",
+            help="Probability that an AP/FD crew flies the commanded sense but with reduced authority.",
         )
 
         opp_bands = None
@@ -451,7 +467,11 @@ with tabs[1]:
             runs=int(n_runs), seed=int(seed), scenario=scenario,
             r0_min_nm=float(r0_min), r0_max_nm=float(r0_max),
             aggressiveness=float(aggressiveness),
-            p_opp=float(p_opp_manual), p_ta=float(p_ta), p_weak=float(p_weak),
+            p_opp=float(p_opp_manual),
+            p_ta_manual=float(p_ta_manual),
+            p_weak_manual=float(p_weak_manual),
+            p_ta_apfd=float(p_ta_apfd),
+            p_weak_apfd=float(p_weak_apfd),
             opp_sense_apfd=None if p_opp_apfd is None else float(p_opp_apfd),
             opp_sense_bands=opp_bands,
             jitter_priors=bool(jitter), apfd_share=apfd_share_sanitized,

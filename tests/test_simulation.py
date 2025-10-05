@@ -15,6 +15,7 @@ from simulation import (
     CAT_INIT_VS_FPM,
     CAT_STRENGTH_FPM,
     apply_non_compliance_to_cat,
+    AppliedNonComplianceProbabilities,
     FT_PER_M,
     G,
     PL_ACCEL_G,
@@ -1485,40 +1486,42 @@ def test_apply_non_compliance_apfd_preserves_sense():
     rng = np.random.default_rng(1234)
     for commanded_sense in (+1, -1):
         for _ in range(64):
-            outcome, flown_sense, *_ = apply_non_compliance_to_cat(
+            outcome, flown_sense, *_, applied = apply_non_compliance_to_cat(
                 rng,
                 commanded_sense,
                 base_delay_s=0.9,
                 base_accel_g=0.25,
                 vs_fpm=CAT_INIT_VS_FPM,
                 cap_fpm=CAT_CAP_INIT_FPM,
-                p_taonly=0.05,
-                p_weak=0.10,
+                p_taonly_apfd=0.05,
+                p_weak_apfd=0.10,
                 jitter=True,
                 cat_mode_key="apfd",
                 mode_label_override="AP/FD",
             )
             assert flown_sense == commanded_sense, outcome
+            assert applied.profile == "apfd"
 
 
 def test_apply_non_compliance_label_override_still_apfd():
     rng = np.random.default_rng(9876)
     commanded_sense = +1
     for _ in range(64):
-        outcome, flown_sense, *_ = apply_non_compliance_to_cat(
+        outcome, flown_sense, *_, applied = apply_non_compliance_to_cat(
             rng,
             commanded_sense,
             base_delay_s=4.5,
             base_accel_g=0.20,
             vs_fpm=CAT_INIT_VS_FPM,
             cap_fpm=CAT_CAP_INIT_FPM,
-            p_taonly=0.05,
-            p_weak=0.10,
+            p_taonly_manual=0.05,
+            p_weak_manual=0.10,
             jitter=False,
             cat_mode_key="manual",
             mode_label_override="AP/FD",
         )
         assert flown_sense == commanded_sense, outcome
+        assert applied.profile == "manual"
 
 
 def test_opposite_sense_model_apfd_probability_zero():
@@ -1545,8 +1548,10 @@ def test_run_batch_manual_opposite_sense_high_rate():
         scenario="Head-on",
         apfd_share=0.0,
         jitter_priors=False,
-        p_ta=0.0,
-        p_weak=0.0,
+        p_ta_manual=0.0,
+        p_weak_manual=0.0,
+        p_ta_apfd=0.0,
+        p_weak_apfd=0.0,
         opp_sense_model=model,
     )
 
@@ -1570,8 +1575,10 @@ def test_run_batch_apfd_opposite_sense_zero_rate():
         scenario="Head-on",
         apfd_share=1.0,
         jitter_priors=False,
-        p_ta=0.0,
-        p_weak=0.0,
+        p_ta_manual=0.0,
+        p_weak_manual=0.0,
+        p_ta_apfd=0.0,
+        p_weak_apfd=0.0,
         opp_sense_model=model,
     )
 
@@ -1595,7 +1602,20 @@ def test_run_batch_records_final_history_and_senses():
         cap_fpm,
         **kwargs,
     ):
-        return ("manual", sense_cat, base_delay_s, base_accel_g, vs_fpm, cap_fpm)
+        return (
+            "manual",
+            sense_cat,
+            base_delay_s,
+            base_accel_g,
+            vs_fpm,
+            cap_fpm,
+            AppliedNonComplianceProbabilities(
+                profile="manual",
+                p_taonly=0.0,
+                p_weak=0.0,
+                p_opp=0.0,
+            ),
+        )
 
     def fake_classify(*args, **kwargs):
         call = fake_classify.calls
@@ -1647,8 +1667,10 @@ def test_run_batch_records_final_history_and_senses():
             scenario="Head-on",
             jitter_priors=False,
             p_opp=0.0,
-            p_ta=0.0,
-            p_weak=0.0,
+            p_ta_manual=0.0,
+            p_weak_manual=0.0,
+            p_ta_apfd=0.0,
+            p_weak_apfd=0.0,
             opp_sense_model=OppositeSenseModel.from_parameters(
                 manual_baseline=0.0,
                 jitter_enabled=False,

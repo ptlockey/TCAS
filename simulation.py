@@ -778,6 +778,22 @@ def normalize_opposite_sense_bands(
     return tuple(normalised)
 
 
+@dataclass(frozen=True)
+class AppliedNonComplianceProbabilities:
+    """Summary of the non-compliance probabilities applied to a run."""
+
+    profile: str
+    p_taonly: float
+    p_weak: float
+    p_opp: float
+
+
+def _clip_probability(value: float) -> float:
+    """Clamp a raw probability to the inclusive [0, 1] range."""
+
+    return max(0.0, min(1.0, float(value)))
+
+
 def apply_non_compliance_to_cat(
     rng: np.random.Generator,
     sense_cat: int,
@@ -785,18 +801,31 @@ def apply_non_compliance_to_cat(
     base_accel_g: float,
     vs_fpm: float,
     cap_fpm: float,
-    p_taonly: float = 0.003,
-    p_weak: float = 0.300,
+    p_taonly_manual: float = 0.003,
+    p_weak_manual: float = 0.300,
+    p_taonly_apfd: float = 0.0005,
+    p_weak_apfd: float = 0.050,
     jitter: bool = True,
     opposite_model: Optional[OppositeSenseModel] = None,
     cat_mode_key: str = "manual",
     cat_alt_ft: Optional[float] = None,
     mode_label_override: Optional[str] = None,
-) -> Tuple[str, int, float, float, float, float]:
+) -> Tuple[str, int, float, float, float, float, AppliedNonComplianceProbabilities]:
     if opposite_model is None:
         opposite_model = OppositeSenseModel()
 
     apfd_mode = _is_apfd_mode(cat_mode_key) or _is_apfd_mode(mode_label_override)
+    profile_key = "apfd" if _is_apfd_mode(cat_mode_key) else "manual"
+    if profile_key == "apfd":
+        p_taonly_base = float(p_taonly_apfd)
+        p_weak_base = float(p_weak_apfd)
+    else:
+        p_taonly_base = float(p_taonly_manual)
+        p_weak_base = float(p_weak_manual)
+
+    p_taonly_eff = _clip_probability(p_taonly_base)
+    p_weak_eff = _clip_probability(p_weak_base)
+
     if apfd_mode:
         p_opp = 0.0
     else:
@@ -808,10 +837,24 @@ def apply_non_compliance_to_cat(
         )
 
     if jitter:
-        p_taonly = max(0.0, min(1.0, p_taonly * rng.uniform(0.7, 1.3)))
-        p_weak = max(0.0, min(1.0, p_weak * rng.uniform(0.7, 1.3)))
+        p_taonly_eff = _clip_probability(p_taonly_eff * rng.uniform(0.7, 1.3))
+        p_weak_eff = _clip_probability(p_weak_eff * rng.uniform(0.7, 1.3))
+
+    max_remainder = max(0.0, 1.0 - p_opp)
+    total_non_compliance = p_taonly_eff + p_weak_eff
+    if total_non_compliance > max_remainder and total_non_compliance > 0.0:
+        scale = max_remainder / total_non_compliance
+        p_taonly_eff *= scale
+        p_weak_eff *= scale
 
     u = rng.uniform()
+
+    applied_probs = AppliedNonComplianceProbabilities(
+        profile=profile_key,
+        p_taonly=p_taonly_eff,
+        p_weak=p_weak_eff,
+        p_opp=p_opp,
+    )
 
     def label_for(outcome: str) -> str:
         if mode_label_override is None:
@@ -829,9 +872,9 @@ def apply_non_compliance_to_cat(
             compliant_accel,
             vs_fpm,
             cap_fpm,
-        )
+        ) + (applied_probs,)
     u -= p_opp
-    if u < p_taonly:
+    if u < p_taonly_eff:
         return (
             label_for("no-response"),
             sense_cat,
@@ -839,9 +882,9 @@ def apply_non_compliance_to_cat(
             0.0,
             0.0,
             0.0,
-        )
-    u -= p_taonly
-    if u < p_weak:
+        ) + (applied_probs,)
+    u -= p_taonly_eff
+    if u < p_weak_eff:
         return (
             label_for("weak-compliance"),
             sense_cat,
@@ -849,7 +892,7 @@ def apply_non_compliance_to_cat(
             float(np.clip(rng.uniform(0.10, 0.18), 0.10, 0.18)),
             float(np.clip(vs_fpm * rng.uniform(0.55, 0.75), 900.0, 1200.0)),
             float(np.clip(cap_fpm * rng.uniform(0.55, 0.80), 900.0, 1300.0)),
-        )
+        ) + (applied_probs,)
     compliant_accel = 0.25
     return (
         label_for("compliant"),
@@ -858,7 +901,7 @@ def apply_non_compliance_to_cat(
         compliant_accel,
         vs_fpm,
         cap_fpm,
-    )
+    ) + (applied_probs,)
 
 
 # ------------------------- Event classification -------------------------
@@ -1403,8 +1446,10 @@ def run_batch(
     r0_max_nm: float = 8.0,
     aggressiveness: float = 0.30,
     p_opp: float = 0.010,
-    p_ta: float = 0.003,
-    p_weak: float = 0.300,
+    p_ta_manual: float = 0.003,
+    p_weak_manual: float = 0.300,
+    p_ta_apfd: float = 0.0005,
+    p_weak_apfd: float = 0.050,
     jitter_priors: bool = True,
     opp_sense_apfd: Optional[float] = None,
     opp_sense_bands: Optional[Iterable[object]] = None,
@@ -1574,6 +1619,7 @@ def run_batch(
             cat_accel_exec,
             cat_vs_exec,
             cat_cap_exec,
+            noncomp_probs,
         ) = apply_non_compliance_to_cat(
             rng,
             sense_ca,
@@ -1581,8 +1627,10 @@ def run_batch(
             base_accel_g=base_accel,
             vs_fpm=CAT_INIT_VS_FPM,
             cap_fpm=CAT_CAP_INIT_FPM,
-            p_taonly=p_ta,
-            p_weak=p_weak,
+            p_taonly_manual=p_ta_manual,
+            p_weak_manual=p_weak_manual,
+            p_taonly_apfd=p_ta_apfd,
+            p_weak_apfd=p_weak_apfd,
             jitter=jitter_priors,
             opposite_model=opposite_model,
             cat_mode_key=cat_mode_key,
@@ -1975,6 +2023,10 @@ def run_batch(
                 catAccel_g=cat_accel_exec,
                 catVS_cmd=cat_vs_exec,
                 catCap_cmd=cat_cap_exec,
+                noncomp_profile=noncomp_probs.profile,
+                noncomp_p_taonly=noncomp_probs.p_taonly,
+                noncomp_p_weak=noncomp_probs.p_weak,
+                noncomp_p_opp=noncomp_probs.p_opp,
                 ALIM_ft=alim_ft,
                 missCPAft=miss_cpa_ft,
                 minsepft=minsep_ft,
@@ -2063,6 +2115,7 @@ __all__ = [
     "simulate_miss_for_senses",
     "choose_optimal_sense",
     "apply_non_compliance_to_cat",
+    "AppliedNonComplianceProbabilities",
     "classify_event",
     "apply_second_phase",
     "sample_altitudes_and_h0",
