@@ -625,7 +625,7 @@ with tabs[1]:
         counts = df['eventtype'].value_counts().reindex(event_order, fill_value=0)
         shares = counts / len(df)
 
-        fig, axes = plt.subplots(1, 2, figsize=(14, 5), constrained_layout=True)
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
         axes[0].bar(event_order, counts[event_order], color=[color_map[e] for e in event_order])
         for idx, evt in enumerate(event_order):
@@ -652,6 +652,7 @@ with tabs[1]:
         axes[1].set_title("Initial geometry by RA outcome")
         axes[1].grid(alpha=0.2)
 
+        fig.tight_layout()
         st.pyplot(fig)
         st.caption(
             "Left: outcome mix across the batch. Right: how initial vertical separation trends with reversal/strengthen events."
