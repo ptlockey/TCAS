@@ -362,6 +362,14 @@ with tabs[0]:
         cat_sense_label = st.selectbox("CAT response", ["Descend", "Level", "Climb"], index=0,
                                        help="Choose how the intruder responds to the resolution advisory in this demo.")
 
+    pl_delay_user = st.number_input(
+        "PL response delay (s)",
+        value=float(PL_DELAY_MEAN_S),
+        min_value=0.0,
+        step=0.1,
+        format="%.1f",
+        help="Reaction delay applied to the protected aircraft for the single run only.",
+    )
     cat_delay_user = st.number_input("CAT pilot delay (s)", value=5.0, min_value=0.0, step=0.5, format="%.1f",
                                      help="Reaction delay applied to the intruder for the single run only.")
     cat_accel_user = st.number_input("CAT acceleration (g)", value=0.25, min_value=0.01, step=0.01, format="%.2f",
@@ -393,7 +401,7 @@ with tabs[0]:
             else:
                 sense_cat = 0
 
-            times, vs_pl = vs_time_series(t_cpa, float(dt), PL_DELAY_MEAN_S, PL_ACCEL_G, PL_VS_FPM,
+            times, vs_pl = vs_time_series(t_cpa, float(dt), float(pl_delay_user), PL_ACCEL_G, PL_VS_FPM,
                                           sense=sense_pl, cap_fpm=PL_VS_CAP_FPM, vs0_fpm=0.0)
 
             if sense_cat == 0 or cat_vs_user <= 1e-6:
@@ -438,6 +446,11 @@ with tabs[0]:
             c_metric3.metric("Δh at CPA", f"{delta_h_cpa:.0f} ft")
             c_metric4.metric("Residual risk", f"{100 * residual_risk:,.3f}%")
             st.caption("These metrics describe the immediate geometry of the hand-crafted encounter.")
+
+            c_metric5, c_metric6 = st.columns(2)
+            c_metric5.metric("delta h PL", f"{delta_h_pl:.0f} ft")
+            c_metric6.metric("delta h CAT", f"{delta_h_cat:.0f} ft")
+            st.caption("Total altitude changes from RA issue to CPA for the protected and intruder aircraft.")
 
             fig, ax = plt.subplots(figsize=(8, 4))
             ax.plot(times_plot, z_pl_plot, label="PL (climb)")
